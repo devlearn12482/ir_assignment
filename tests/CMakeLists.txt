@@ -1,6 +1,7 @@
 add_executable(unit_tests
     fixed_point_test.cpp
     simdjson_contract_test.cpp
+    spot_book_test.cpp
     spot_payload_parser_test.cpp
     unit_tests.cpp
 )
