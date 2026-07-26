@@ -5,6 +5,7 @@
 int main() {
     hft::test::Context context;
     hft::test::run_buffered_file_sink_tests(context);
+    hft::test::run_command_line_tests(context);
     hft::test::run_csv_formatter_tests(context);
     hft::test::run_csv_output_set_tests(context);
     hft::test::run_symbol_identity_tests(context);
