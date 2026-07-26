@@ -13,6 +13,7 @@ int main() {
     hft::test::run_usdm_payload_parser_tests(context);
     hft::test::run_usdm_book_tests(context);
     hft::test::run_event_processor_tests(context);
+    hft::test::run_event_processor_robustness_tests(context);
 
     if (context.result() == 0) {
         std::cout << "PASS: all unit tests\n";
