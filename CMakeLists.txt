@@ -39,6 +39,7 @@ endfunction()
 
 add_library(hft_core STATIC
     src/buffered_file_sink.cpp
+    src/command_line.cpp
     src/csv_formatter.cpp
     src/csv_output_set.cpp
     src/event_processor.cpp
@@ -77,6 +78,10 @@ endif()
 
 target_link_libraries(hft_core PRIVATE simdjson::simdjson)
 
+add_executable(binance_capture src/main.cpp)
+target_link_libraries(binance_capture PRIVATE hft_core simdjson::simdjson)
+hft_enable_project_warnings(binance_capture)
+
 include(CTest)
 
 if(BUILD_TESTING)
@@ -93,7 +98,7 @@ if(BUILD_TESTING)
             "${CMAKE_CTEST_COMMAND}"
             ${hft_ctest_configuration}
             --output-on-failure
-        DEPENDS unit_tests
+        DEPENDS unit_tests binance_capture
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
         USES_TERMINAL
         COMMENT "Running baseline unit tests"

@@ -1,5 +1,6 @@
 add_executable(unit_tests
     buffered_file_sink_test.cpp
+    command_line_test.cpp
     csv_formatter_test.cpp
     csv_output_set_test.cpp
     event_processor_test.cpp
@@ -39,6 +40,17 @@ foreach(configuration Debug Release RelWithDebInfo MinSizeRel)
 endforeach()
 
 add_test(NAME unit_tests COMMAND unit_tests)
+
+add_test(
+    NAME replay_cli
+    COMMAND
+        "${CMAKE_COMMAND}"
+        -DBINANCE_CAPTURE=$<TARGET_FILE:binance_capture>
+        -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+        -DBINARY_DIR=${CMAKE_BINARY_DIR}
+        -P
+        "${CMAKE_CURRENT_SOURCE_DIR}/run_replay_cli_test.cmake"
+)
 
 find_program(HFT_SHA256SUM_EXECUTABLE sha256sum)
 if(HFT_SHA256SUM_EXECUTABLE)
