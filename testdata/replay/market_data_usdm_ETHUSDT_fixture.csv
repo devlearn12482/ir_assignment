@@ -1,0 +1,7 @@
+recv_tsec,recv_tnsec,venue,stream_kind,shard_id,conn_epoch,conn_seq,symbol,payload_json
+1700000100,100,usdm,depth5,0,0,1,ETHUSDT,"{""e"":""depthUpdate"",""E"":1,""T"":1,""s"":""ETHUSDT"",""U"":200,""u"":205,""pu"":199,""b"":[[""2000"",""1""]],""a"":[[""2001"",""1""]]}"
+1700000100,200,usdm,depth_diff,0,0,2,ETHUSDT,"{""e"":""depthUpdate"",""E"":2,""T"":2,""s"":""ETHUSDT"",""U"":206,""u"":207,""pu"":0,""b"":[[""2000"",""2""]],""a"":[]}"
+1700000100,300,usdm,depth_diff,0,0,3,ETHUSDT,"{""e"":""depthUpdate"",""E"":3,""T"":3,""s"":""ETHUSDT"",""U"":208,""u"":208,""pu"":207,""b"":[],""a"":[[""2001"",""3""]]}"
+1700000100,400,usdm,depth_diff,0,0,4,ETHUSDT,"{""e"":""depthUpdate"",""E"":4,""T"":4,""s"":""ETHUSDT"",""U"":209,""u"":209,""pu"":999,""b"":[],""a"":[]}"
+1700000100,500,usdm,trade,0,0,5,ETHUSDT,"{""e"":""trade"",""s"":""ETHUSDT"",""p"":""2000"",""q"":""1""}"
+1700000101,100,usdm,depth5,0,1,1,ETHUSDT,"{""e"":""depthUpdate"",""E"":6,""T"":6,""s"":""ETHUSDT"",""U"":300,""u"":305,""pu"":299,""b"":[[""1999"",""4""]],""a"":[[""2002"",""5""]]}"

@@ -5,6 +5,7 @@ add_executable(unit_tests
     event_processor_test.cpp
     event_processor_robustness_test.cpp
     fixed_point_test.cpp
+    market_data_replay_test.cpp
     simdjson_contract_test.cpp
     spot_book_test.cpp
     spot_payload_parser_test.cpp
@@ -15,6 +16,10 @@ add_executable(unit_tests
 )
 
 target_include_directories(unit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_definitions(
+    unit_tests
+    PRIVATE HFT_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
 target_link_libraries(unit_tests PRIVATE hft_core simdjson::simdjson)
 hft_enable_project_warnings(unit_tests)
 
@@ -34,3 +39,16 @@ foreach(configuration Debug Release RelWithDebInfo MinSizeRel)
 endforeach()
 
 add_test(NAME unit_tests COMMAND unit_tests)
+
+find_program(HFT_SHA256SUM_EXECUTABLE sha256sum)
+if(HFT_SHA256SUM_EXECUTABLE)
+    add_test(
+        NAME replay_fixture_hashes
+        COMMAND
+            "${HFT_SHA256SUM_EXECUTABLE}"
+            --check
+            SHA256SUMS
+        WORKING_DIRECTORY
+            "${CMAKE_SOURCE_DIR}/testdata/replay"
+    )
+endif()
