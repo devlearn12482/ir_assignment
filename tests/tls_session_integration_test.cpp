@@ -97,7 +97,10 @@ void run_server(
                 "HTTP upgrade read: " + error.message();
             return;
         }
-        outcome.request_target = request.target();
+        const boost::beast::string_view request_target =
+            request.target();
+        outcome.request_target.assign(
+            request_target.data(), request_target.size());
         outcome.compression_offered =
             request.find(
                 boost::beast::http::field::
