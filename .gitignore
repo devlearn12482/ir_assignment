@@ -1,0 +1,32 @@
+# CMake and compiler output
+/build/
+/build-*/
+/out/
+*.o
+*.obj
+*.a
+*.so
+*.dll
+*.dylib
+*.exe
+
+# Runtime output and local scratch
+/output/
+/replay_output/
+/tmp/
+*.log
+
+# Local credentials and private-key material
+.env
+.env.*
+config/secrets.json
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Editor-local state
+/.idea/
+/.vscode/
+
+# Do not ignore *.csv globally: curated fixtures and sample CSVs are deliverables.
