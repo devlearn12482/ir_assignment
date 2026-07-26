@@ -1,40 +1,14 @@
-#include <simdjson.h>
+#include "test_framework.h"
 
 #include <cstddef>
-#include <iostream>
 #include <string_view>
 #include <vector>
 
-namespace {
+#include <simdjson.h>
 
-class TestContext {
-public:
-    void expect(const bool condition, const std::string_view message) {
-        if (!condition) {
-            ++failures_;
-            std::cerr << "FAIL: " << message << '\n';
-        }
-    }
+namespace hft::test {
 
-    void expect_success(
-        const simdjson::error_code error,
-        const std::string_view operation) {
-        if (error != simdjson::SUCCESS) {
-            ++failures_;
-            std::cerr << "FAIL: " << operation << ": "
-                      << simdjson::error_message(error) << '\n';
-        }
-    }
-
-    [[nodiscard]] int result() const noexcept {
-        return failures_ == 0 ? 0 : 1;
-    }
-
-private:
-    int failures_{0};
-};
-
-void test_pinned_simdjson_contract(TestContext& context) {
+void run_simdjson_contract_tests(Context& context) {
     static_assert(simdjson::SIMDJSON_VERSION_MAJOR == 3);
     static_assert(simdjson::SIMDJSON_VERSION_MINOR == 6);
     static_assert(simdjson::SIMDJSON_VERSION_REVISION == 4);
@@ -64,7 +38,9 @@ void test_pinned_simdjson_contract(TestContext& context) {
 
     const simdjson::error_code iterate_error =
         parser.iterate(padded_source).get(document);
-    context.expect_success(iterate_error, "ondemand::parser::iterate");
+    context.expect(
+        iterate_error == simdjson::SUCCESS,
+        "ondemand::parser::iterate succeeds");
     if (iterate_error != simdjson::SUCCESS) {
         return;
     }
@@ -72,7 +48,9 @@ void test_pinned_simdjson_contract(TestContext& context) {
     std::string_view raw_data;
     const simdjson::error_code raw_error =
         document["data"].raw_json().get(raw_data);
-    context.expect_success(raw_error, "ondemand::value::raw_json");
+    context.expect(
+        raw_error == simdjson::SUCCESS,
+        "ondemand::value::raw_json succeeds");
     if (raw_error != simdjson::SUCCESS) {
         return;
     }
@@ -84,7 +62,9 @@ void test_pinned_simdjson_contract(TestContext& context) {
         raw_data.size(),
         output.data(),
         output_length);
-    context.expect_success(minify_error, "output-buffer simdjson::minify");
+    context.expect(
+        minify_error == simdjson::SUCCESS,
+        "output-buffer simdjson::minify succeeds");
     if (minify_error != simdjson::SUCCESS) {
         return;
     }
@@ -95,14 +75,5 @@ void test_pinned_simdjson_contract(TestContext& context) {
         "minification removes only insignificant whitespace and preserves "
         "numeric lexemes, string escapes, array order, and object-key order");
 }
-}  // namespace
 
-int main() {
-    TestContext context;
-    test_pinned_simdjson_contract(context);
-
-    if (context.result() == 0) {
-        std::cout << "PASS: simdjson 3.6.4 dependency contract\n";
-    }
-    return context.result();
-}
+}  // namespace hft::test
