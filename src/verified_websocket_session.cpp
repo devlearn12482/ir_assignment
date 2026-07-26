@@ -11,15 +11,17 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/beast/core.hpp>
+#include <boost/beast/core/flat_static_buffer.hpp>
 #include <boost/beast/ssl.hpp>
 #include <boost/beast/websocket.hpp>
 
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 
-#include <chrono>
 #include <atomic>
+#include <chrono>
 #include <exception>
+#include <limits>
 #include <new>
 #include <string>
 #include <utility>
@@ -85,11 +87,18 @@ struct VerifiedWebSocketSession::Impl {
     ssl::context tls_context{ssl::context::tls_client};
     Tcp::resolver resolver;
     std::unique_ptr<WebSocketStream> websocket{};
+    beast::flat_static_buffer<kMaxPayloadBytes> read_buffer;
     asio::steady_timer deadline;
     VerifiedWebSocketEndpoint endpoint;
     WebSocketSessionCallbacks callbacks;
     State state{State::idle};
     bool start_requested{false};
+    bool read_in_progress{false};
+    bool in_control_callback{false};
+    bool stop_requested_during_control{false};
+    bool control_callback_failed{false};
+    std::uint64_t connection_epoch{0};
+    std::uint64_t connection_sequence{0};
     std::atomic<bool> terminal_flag{false};
 
     Impl(
@@ -159,12 +168,17 @@ struct VerifiedWebSocketSession::Impl {
         }
         websocket =
             std::make_unique<WebSocketStream>(strand, tls_context);
+        websocket->control_callback(
+            [this](
+                const websocket::frame_type frame_type,
+                const beast::string_view payload) {
+                on_control_frame(frame_type, payload);
+            });
         return {};
     }
 
-    [[nodiscard]] static constexpr WebSocketSessionStage
-    stage_for_state(const State current_state) noexcept {
-        switch (current_state) {
+    [[nodiscard]] WebSocketSessionStage active_stage() const noexcept {
+        switch (state) {
             case State::idle:
                 return WebSocketSessionStage::none;
             case State::resolving:
@@ -176,13 +190,79 @@ struct VerifiedWebSocketSession::Impl {
             case State::websocket_handshaking:
                 return WebSocketSessionStage::websocket_handshake;
             case State::open:
-                return WebSocketSessionStage::open;
+                return read_in_progress
+                           ? WebSocketSessionStage::read
+                           : WebSocketSessionStage::open;
             case State::closing:
                 return WebSocketSessionStage::websocket_close;
             case State::terminal:
                 return WebSocketSessionStage::none;
         }
         return WebSocketSessionStage::none;
+    }
+
+    void on_control_frame(
+        const websocket::frame_type frame_type,
+        const beast::string_view payload) noexcept {
+        WebSocketControlKind kind;
+        switch (frame_type) {
+            case websocket::frame_type::ping:
+                kind = WebSocketControlKind::ping;
+                break;
+            case websocket::frame_type::pong:
+                kind = WebSocketControlKind::pong;
+                break;
+            case websocket::frame_type::close:
+                kind = WebSocketControlKind::close;
+                break;
+            default:
+                return;
+        }
+        if (!callbacks.on_control) {
+            return;
+        }
+        in_control_callback = true;
+        try {
+            callbacks.on_control(WebSocketControlFrame{
+                kind,
+                std::string_view{payload.data(), payload.size()}});
+        } catch (...) {
+            control_callback_failed = true;
+        }
+        in_control_callback = false;
+        if ((control_callback_failed ||
+             stop_requested_during_control) &&
+            websocket) {
+            boost::system::error_code ignored;
+            beast::get_lowest_layer(*websocket)
+                .socket()
+                .cancel(ignored);
+        }
+    }
+
+    [[nodiscard]] static bool capture_receive_timestamp(
+        CsvTimestamp& timestamp) noexcept {
+        const auto elapsed =
+            std::chrono::system_clock::now().time_since_epoch();
+        const auto seconds =
+            std::chrono::duration_cast<std::chrono::seconds>(
+                elapsed);
+        const auto nanoseconds =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                elapsed - seconds);
+        if (seconds.count() < 0 || nanoseconds.count() < 0 ||
+            nanoseconds.count() >= 1'000'000'000) {
+            return false;
+        }
+        timestamp.seconds =
+            static_cast<std::uint64_t>(seconds.count());
+        timestamp.nanoseconds =
+            static_cast<std::uint32_t>(nanoseconds.count());
+        return true;
+    }
+
+    void clear_read_buffer() noexcept {
+        read_buffer.consume(read_buffer.size());
     }
 
     void arm_deadline(
@@ -228,11 +308,15 @@ struct VerifiedWebSocketSession::Impl {
         if (state == State::terminal) {
             return;
         }
+        result.last_connection_sequence = connection_sequence;
         state = State::terminal;
         terminal_flag.store(true, std::memory_order_release);
         cancel_deadline();
         resolver.cancel();
         close_lowest_layer();
+        if (!read_in_progress) {
+            clear_read_buffer();
+        }
         auto terminal_callback = std::move(callbacks.on_terminal);
         callbacks = {};
         if (terminal_callback) {
@@ -241,6 +325,149 @@ struct VerifiedWebSocketSession::Impl {
             } catch (...) {
                 // Terminal state and resource teardown are already complete.
             }
+        }
+    }
+
+    void issue_read(
+        std::shared_ptr<VerifiedWebSocketSession> owner) {
+        if (state != State::open || read_in_progress) {
+            return;
+        }
+        read_in_progress = true;
+        websocket->async_read(
+            read_buffer,
+            [owner = std::move(owner)](
+                const boost::system::error_code& error,
+                const std::size_t bytes_transferred) {
+                owner->impl_->on_read(
+                    error, bytes_transferred, owner);
+            });
+    }
+
+    void on_read(
+        const boost::system::error_code& error,
+        const std::size_t bytes_transferred,
+        std::shared_ptr<VerifiedWebSocketSession> owner) {
+        if (!read_in_progress) {
+            return;
+        }
+        read_in_progress = false;
+        if (state != State::open) {
+            clear_read_buffer();
+            return;
+        }
+
+        if (control_callback_failed) {
+            clear_read_buffer();
+            finish(WebSocketSessionResult{
+                WebSocketSessionErrorCode::callback_failure,
+                WebSocketSessionStage::read,
+                error});
+            return;
+        }
+        if (stop_requested_during_control) {
+            clear_read_buffer();
+            finish(WebSocketSessionResult{
+                WebSocketSessionErrorCode::cancelled,
+                WebSocketSessionStage::read,
+                error});
+            return;
+        }
+        if (error) {
+            const bool had_incomplete_bytes =
+                read_buffer.size() != 0U;
+            clear_read_buffer();
+            if (error == websocket::error::message_too_big ||
+                error == websocket::error::buffer_overflow) {
+                finish(WebSocketSessionResult{
+                    WebSocketSessionErrorCode::message_too_big,
+                    WebSocketSessionStage::read,
+                    error});
+                return;
+            }
+            if (error == websocket::error::closed) {
+                finish(WebSocketSessionResult{
+                    WebSocketSessionErrorCode::remote_close,
+                    WebSocketSessionStage::read,
+                    error});
+                return;
+            }
+            finish(WebSocketSessionResult{
+                had_incomplete_bytes
+                    ? WebSocketSessionErrorCode::
+                          incomplete_message
+                    : WebSocketSessionErrorCode::read_failure,
+                WebSocketSessionStage::read,
+                error});
+            return;
+        }
+        if (bytes_transferred != read_buffer.size()) {
+            clear_read_buffer();
+            finish(WebSocketSessionResult{
+                WebSocketSessionErrorCode::read_failure,
+                WebSocketSessionStage::read,
+                invalid_argument_error()});
+            return;
+        }
+        if (connection_sequence ==
+            std::numeric_limits<std::uint64_t>::max()) {
+            clear_read_buffer();
+            finish(WebSocketSessionResult{
+                WebSocketSessionErrorCode::sequence_overflow,
+                WebSocketSessionStage::read,
+                {}});
+            return;
+        }
+        ++connection_sequence;
+
+        CsvTimestamp timestamp;
+        if (!capture_receive_timestamp(timestamp)) {
+            clear_read_buffer();
+            finish(WebSocketSessionResult{
+                WebSocketSessionErrorCode::timestamp_failure,
+                WebSocketSessionStage::read,
+                {}});
+            return;
+        }
+        if (!websocket->got_text()) {
+            clear_read_buffer();
+            finish(WebSocketSessionResult{
+                WebSocketSessionErrorCode::binary_message,
+                WebSocketSessionStage::read,
+                {}});
+            return;
+        }
+
+        const asio::const_buffer payload_buffer =
+            beast::buffers_front(read_buffer.data());
+        const WebSocketTextMessage message{
+            timestamp,
+            connection_epoch,
+            connection_sequence,
+            std::string_view{
+                static_cast<const char*>(payload_buffer.data()),
+                payload_buffer.size()}};
+        if (!callbacks.on_text_message) {
+            clear_read_buffer();
+            finish(WebSocketSessionResult{
+                WebSocketSessionErrorCode::callback_failure,
+                WebSocketSessionStage::read,
+                {}});
+            return;
+        }
+        try {
+            callbacks.on_text_message(message);
+        } catch (...) {
+            clear_read_buffer();
+            finish(WebSocketSessionResult{
+                WebSocketSessionErrorCode::callback_failure,
+                WebSocketSessionStage::read,
+                {}});
+            return;
+        }
+        clear_read_buffer();
+        if (state == State::open) {
+            issue_read(std::move(owner));
         }
     }
 
@@ -403,6 +630,9 @@ struct VerifiedWebSocketSession::Impl {
                             {}});
                     }
                 }
+                if (self.state == State::open) {
+                    self.issue_read(std::move(owner));
+                }
             });
     }
 
@@ -410,10 +640,24 @@ struct VerifiedWebSocketSession::Impl {
         if (state == State::terminal) {
             return;
         }
+        if (state == State::closing) {
+            return;
+        }
+        if (in_control_callback) {
+            stop_requested_during_control = true;
+            return;
+        }
         if (state != State::open) {
             finish(WebSocketSessionResult{
                 WebSocketSessionErrorCode::cancelled,
-                stage_for_state(state),
+                active_stage(),
+                asio::error::operation_aborted});
+            return;
+        }
+        if (read_in_progress) {
+            finish(WebSocketSessionResult{
+                WebSocketSessionErrorCode::cancelled,
+                WebSocketSessionStage::read,
                 asio::error::operation_aborted});
             return;
         }
@@ -433,6 +677,14 @@ struct VerifiedWebSocketSession::Impl {
                     return;
                 }
                 self.cancel_deadline();
+                if (self.control_callback_failed) {
+                    self.finish(WebSocketSessionResult{
+                        WebSocketSessionErrorCode::
+                            callback_failure,
+                        WebSocketSessionStage::websocket_close,
+                        error});
+                    return;
+                }
                 if (error && error != websocket::error::closed) {
                     self.finish(WebSocketSessionResult{
                         WebSocketSessionErrorCode::close_failure,

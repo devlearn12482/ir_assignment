@@ -1,5 +1,6 @@
 #pragma once
 
+#include "hft/csv_formatter.h"
 #include "hft/live_subscription.h"
 
 #include <boost/asio/io_context.hpp>
@@ -36,6 +37,7 @@ enum class WebSocketSessionStage : std::uint8_t {
     tls_handshake,
     websocket_handshake,
     open,
+    read,
     websocket_close,
 };
 
@@ -50,6 +52,13 @@ enum class WebSocketSessionErrorCode : std::uint8_t {
     sni_failure,
     tls_handshake_failure,
     websocket_handshake_failure,
+    read_failure,
+    incomplete_message,
+    binary_message,
+    message_too_big,
+    remote_close,
+    sequence_overflow,
+    timestamp_failure,
     close_failure,
     callback_failure,
     timeout,
@@ -61,17 +70,44 @@ struct WebSocketSessionResult {
         WebSocketSessionErrorCode::none};
     WebSocketSessionStage stage{WebSocketSessionStage::none};
     boost::system::error_code native_error{};
+    std::uint64_t last_connection_sequence{0};
 
     [[nodiscard]] bool success() const noexcept {
         return code == WebSocketSessionErrorCode::none;
     }
 };
 
+enum class WebSocketControlKind : std::uint8_t {
+    ping,
+    pong,
+    close,
+};
+
+struct WebSocketTextMessage {
+    CsvTimestamp receive_timestamp{};
+    std::uint64_t connection_epoch{0};
+    std::uint64_t connection_sequence{0};
+    // The view is valid only for the synchronous callback invocation.
+    std::string_view payload{};
+};
+
+struct WebSocketControlFrame {
+    WebSocketControlKind kind{WebSocketControlKind::ping};
+    // Control payloads are at most 125 bytes. The view is valid only for
+    // the synchronous callback invocation.
+    std::string_view payload{};
+};
+
 struct WebSocketSessionCallbacks {
-    // Callbacks run on the session strand. Exceptions from on_open terminate
-    // the session as callback_failure; exceptions from the terminal
-    // notification are contained because the session is already terminal.
+    // Callbacks run serially on the session strand. on_text_message observes
+    // complete text messages only; binary payload bytes are never exposed.
+    // on_control is passive because Beast owns protocol replies.
+    // Exceptions from non-terminal callbacks terminate the session as
+    // callback_failure; terminal notification exceptions are contained.
     std::function<void()> on_open{};
+    std::function<void(const WebSocketTextMessage&)>
+        on_text_message{};
+    std::function<void(const WebSocketControlFrame&)> on_control{};
     std::function<void(WebSocketSessionResult)> on_terminal{};
 };
 
@@ -143,6 +179,8 @@ private:
             return "websocket_handshake";
         case WebSocketSessionStage::open:
             return "open";
+        case WebSocketSessionStage::read:
+            return "read";
         case WebSocketSessionStage::websocket_close:
             return "websocket_close";
     }
@@ -172,6 +210,20 @@ private:
             return "tls_handshake_failure";
         case WebSocketSessionErrorCode::websocket_handshake_failure:
             return "websocket_handshake_failure";
+        case WebSocketSessionErrorCode::read_failure:
+            return "read_failure";
+        case WebSocketSessionErrorCode::incomplete_message:
+            return "incomplete_message";
+        case WebSocketSessionErrorCode::binary_message:
+            return "binary_message";
+        case WebSocketSessionErrorCode::message_too_big:
+            return "message_too_big";
+        case WebSocketSessionErrorCode::remote_close:
+            return "remote_close";
+        case WebSocketSessionErrorCode::sequence_overflow:
+            return "sequence_overflow";
+        case WebSocketSessionErrorCode::timestamp_failure:
+            return "timestamp_failure";
         case WebSocketSessionErrorCode::close_failure:
             return "close_failure";
         case WebSocketSessionErrorCode::callback_failure:
@@ -180,6 +232,19 @@ private:
             return "timeout";
         case WebSocketSessionErrorCode::cancelled:
             return "cancelled";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] constexpr std::string_view to_string(
+    const WebSocketControlKind kind) noexcept {
+    switch (kind) {
+        case WebSocketControlKind::ping:
+            return "ping";
+        case WebSocketControlKind::pong:
+            return "pong";
+        case WebSocketControlKind::close:
+            return "close";
     }
     return "unknown";
 }

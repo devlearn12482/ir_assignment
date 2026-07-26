@@ -118,6 +118,7 @@ if(BUILD_TESTING)
             unit_tests
             binance_capture
             tls_session_integration_test
+            websocket_read_loop_integration_test
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
         USES_TERMINAL
         COMMENT "Running baseline unit tests"
