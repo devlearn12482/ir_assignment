@@ -1,0 +1,120 @@
+name: Required Ubuntu 22.04 toolchain
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu-22-04:
+    name: Ubuntu 22.04 / GCC 12 / C++17
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Verify operating system
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "${ID}" = "ubuntu"
+          test "${VERSION_ID}" = "22.04"
+          printf 'os=%s\n' "${PRETTY_NAME}"
+          uname -a
+
+      - name: Install assignment dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake ninja-build \
+            g++-12 \
+            libssl-dev \
+            libboost-all-dev \
+            zlib1g-dev
+
+      - name: Record required tool versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/cmake --version
+          /usr/bin/ninja --version
+          /usr/bin/g++-12 --version
+          /usr/bin/c++ --version
+          dpkg-query -W \
+            cmake ninja-build g++-12 \
+            libssl-dev libboost-all-dev zlib1g-dev
+
+      - name: Run PDF build and test commands
+        shell: bash
+        run: |
+          set -euo pipefail
+          PATH=/usr/bin:/bin
+          export PATH
+
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-12 \
+            -DCMAKE_CXX_FLAGS="-Wall -Wextra -O2"
+
+          cmake --build build --parallel
+          cmake --build build --target tests
+          ./build/tests/unit_tests
+
+      - name: Run reviewer clean-build command
+        shell: bash
+        run: |
+          set -euo pipefail
+          PATH=/usr/bin:/bin
+          export PATH
+
+          rm -rf build
+          test "$(/usr/bin/c++ -dumpversion | cut -d. -f1)" = "11"
+          cmake -B build
+          cmake --build build
+          cmake --build build --target tests
+          ./build/tests/unit_tests
+
+      - name: Run strict GCC 12 build
+        shell: bash
+        run: |
+          set -euo pipefail
+          PATH=/usr/bin:/bin
+          export PATH
+
+          cmake -B build-strict -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-12 \
+            -DHFT_WARNINGS_AS_ERRORS=ON
+
+          cmake --build build-strict --target tests --parallel
+          ./build-strict/tests/unit_tests
+
+      - name: Run GCC 12 ASan and UBSan build
+        shell: bash
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: |
+          set -euo pipefail
+          PATH=/usr/bin:/bin
+          export PATH
+
+          cmake -B build-sanitize -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER=g++-12 \
+            -DHFT_WARNINGS_AS_ERRORS=ON \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+          cmake --build build-sanitize --target tests --parallel
+          ./build-sanitize/tests/unit_tests

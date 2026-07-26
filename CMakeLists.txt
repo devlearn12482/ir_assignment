@@ -37,6 +37,18 @@ function(hft_enable_project_warnings target)
     endif()
 endfunction()
 
+add_library(hft_core STATIC
+    src/fixed_point.cpp
+)
+
+target_compile_features(hft_core PUBLIC cxx_std_17)
+target_include_directories(
+    hft_core
+    PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
+hft_enable_project_warnings(hft_core)
+
 add_library(simdjson_vendor STATIC
     third_party/simdjson/simdjson.cpp
 )
@@ -54,6 +66,7 @@ if(MSVC)
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(simdjson_vendor PRIVATE -w)
 endif()
+
 include(CTest)
 
 if(BUILD_TESTING)

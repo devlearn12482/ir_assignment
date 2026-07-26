@@ -1,8 +1,11 @@
 add_executable(unit_tests
+    fixed_point_test.cpp
     simdjson_contract_test.cpp
+    unit_tests.cpp
 )
 
-target_link_libraries(unit_tests PRIVATE simdjson::simdjson)
+target_include_directories(unit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(unit_tests PRIVATE hft_core simdjson::simdjson)
 hft_enable_project_warnings(unit_tests)
 
 set_target_properties(
