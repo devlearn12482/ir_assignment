@@ -26,6 +26,18 @@ add_executable(
 target_link_libraries(tls_session_integration_test PRIVATE hft_core)
 hft_enable_project_warnings(tls_session_integration_test)
 
+add_executable(
+    websocket_read_loop_integration_test
+    websocket_read_loop_integration_test.cpp
+)
+target_link_libraries(
+    websocket_read_loop_integration_test
+    PRIVATE
+        hft_core
+)
+hft_enable_project_warnings(
+    websocket_read_loop_integration_test)
+
 target_include_directories(unit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_definitions(
     unit_tests
@@ -57,6 +69,17 @@ add_test(
     COMMAND
         "${CMAKE_COMMAND}"
         -DTEST_EXECUTABLE=$<TARGET_FILE:tls_session_integration_test>
+        -DOPENSSL_EXECUTABLE=${HFT_OPENSSL_EXECUTABLE}
+        -DBINARY_DIR=${CMAKE_BINARY_DIR}
+        -P
+        "${CMAKE_CURRENT_SOURCE_DIR}/run_tls_session_integration.cmake"
+)
+
+add_test(
+    NAME websocket_complete_messages
+    COMMAND
+        "${CMAKE_COMMAND}"
+        -DTEST_EXECUTABLE=$<TARGET_FILE:websocket_read_loop_integration_test>
         -DOPENSSL_EXECUTABLE=${HFT_OPENSSL_EXECUTABLE}
         -DBINARY_DIR=${CMAKE_BINARY_DIR}
         -P

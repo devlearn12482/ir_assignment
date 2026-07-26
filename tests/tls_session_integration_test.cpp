@@ -135,6 +135,7 @@ ClientOutcome run_client(
     callbacks.on_open = [&] {
         outcome.opened = true;
         session->stop();
+        session->stop();
     };
     callbacks.on_terminal =
         [&](const hft::WebSocketSessionResult result) {
