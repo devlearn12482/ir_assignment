@@ -736,21 +736,32 @@ struct SpotPayloadParser::Impl {
 
     [[nodiscard]] SpotParseResult parse_depth(
         simdjson::ondemand::object& object,
+        const PayloadVenue venue,
         const SpotStreamKind kind,
         const std::string_view expected_symbol) noexcept {
         constexpr std::uint32_t kEventTypeBit{1U << 0U};
         constexpr std::uint32_t kEventTimeBit{1U << 1U};
-        constexpr std::uint32_t kSymbolBit{1U << 2U};
-        constexpr std::uint32_t kFirstUpdateIdBit{1U << 3U};
-        constexpr std::uint32_t kFinalUpdateIdBit{1U << 4U};
-        constexpr std::uint32_t kLastUpdateIdBit{1U << 5U};
-        constexpr std::uint32_t kBidsBit{1U << 6U};
-        constexpr std::uint32_t kAsksBit{1U << 7U};
-        constexpr std::uint32_t kDiffRequired{
+        constexpr std::uint32_t kTransactionTimeBit{1U << 2U};
+        constexpr std::uint32_t kSymbolBit{1U << 3U};
+        constexpr std::uint32_t kFirstUpdateIdBit{1U << 4U};
+        constexpr std::uint32_t kFinalUpdateIdBit{1U << 5U};
+        constexpr std::uint32_t kPreviousUpdateIdBit{1U << 6U};
+        constexpr std::uint32_t kLastUpdateIdBit{1U << 7U};
+        constexpr std::uint32_t kBidsBit{1U << 8U};
+        constexpr std::uint32_t kAsksBit{1U << 9U};
+        constexpr std::uint32_t kSpotDiffRequired{
             kEventTypeBit | kEventTimeBit | kSymbolBit |
             kFirstUpdateIdBit | kFinalUpdateIdBit | kBidsBit | kAsksBit};
-        constexpr std::uint32_t kPartialRequired{
+        constexpr std::uint32_t kSpotPartialRequired{
             kLastUpdateIdBit | kBidsBit | kAsksBit};
+        constexpr std::uint32_t kUsdMRequired{
+            kEventTypeBit | kEventTimeBit | kTransactionTimeBit |
+            kSymbolBit | kFirstUpdateIdBit | kFinalUpdateIdBit |
+            kPreviousUpdateIdBit | kBidsBit | kAsksBit};
+
+        const bool is_usdm = venue == PayloadVenue::usdm;
+        const bool uses_depth_update_shape =
+            is_usdm || kind == SpotStreamKind::depth_diff;
 
         SpotParseResult result;
         result.event.kind = kind;
@@ -826,7 +837,7 @@ struct SpotPayloadParser::Impl {
             }
 
             simdjson::ondemand::value& value = field.value();
-            if (kind == SpotStreamKind::depth_diff && key == "e") {
+            if (uses_depth_update_shape && key == "e") {
                 if (duplicate(
                         kEventTypeBit, SpotField::event_type, value)) {
                     if (is_fatal_document_error(result.error)) {
@@ -849,7 +860,7 @@ struct SpotPayloadParser::Impl {
                         SpotField::event_type);
                 }
             } else if (
-                kind == SpotStreamKind::depth_diff && key == "E") {
+                uses_depth_update_shape && key == "E") {
                 if (duplicate(
                         kEventTimeBit, SpotField::event_time, value)) {
                     if (is_fatal_document_error(result.error)) {
@@ -868,8 +879,29 @@ struct SpotPayloadParser::Impl {
                     continue;
                 }
                 result.event.depth.has_event_time = true;
+            } else if (is_usdm && key == "T") {
+                if (duplicate(
+                        kTransactionTimeBit,
+                        SpotField::transaction_time,
+                        value)) {
+                    if (is_fatal_document_error(result.error)) {
+                        return result;
+                    }
+                    continue;
+                }
+                const ParseFailure value_error = read_json_uint64(
+                    value,
+                    result.event.depth.transaction_time_ms,
+                    SpotField::transaction_time);
+                if (apply_failure(value_error)) {
+                    if (is_fatal_document_error(result.error)) {
+                        return result;
+                    }
+                    continue;
+                }
+                result.event.depth.has_transaction_time = true;
             } else if (
-                kind == SpotStreamKind::depth_diff && key == "s") {
+                uses_depth_update_shape && key == "s") {
                 if (duplicate(kSymbolBit, SpotField::symbol, value)) {
                     if (is_fatal_document_error(result.error)) {
                         return result;
@@ -892,7 +924,7 @@ struct SpotPayloadParser::Impl {
                         SpotField::symbol);
                 }
             } else if (
-                kind == SpotStreamKind::depth_diff && key == "U") {
+                uses_depth_update_shape && key == "U") {
                 if (duplicate(
                         kFirstUpdateIdBit,
                         SpotField::first_update_id,
@@ -913,7 +945,7 @@ struct SpotPayloadParser::Impl {
                     continue;
                 }
             } else if (
-                kind == SpotStreamKind::depth_diff && key == "u") {
+                uses_depth_update_shape && key == "u") {
                 if (duplicate(
                         kFinalUpdateIdBit,
                         SpotField::final_update_id,
@@ -933,8 +965,29 @@ struct SpotPayloadParser::Impl {
                     }
                     continue;
                 }
+            } else if (is_usdm && key == "pu") {
+                if (duplicate(
+                        kPreviousUpdateIdBit,
+                        SpotField::previous_update_id,
+                        value)) {
+                    if (is_fatal_document_error(result.error)) {
+                        return result;
+                    }
+                    continue;
+                }
+                const ParseFailure value_error = read_json_uint64(
+                    value,
+                    result.event.depth.previous_update_id,
+                    SpotField::previous_update_id);
+                if (apply_failure(value_error)) {
+                    if (is_fatal_document_error(result.error)) {
+                        return result;
+                    }
+                    continue;
+                }
+                result.event.depth.has_previous_update_id = true;
             } else if (
-                kind == SpotStreamKind::depth5 &&
+                !is_usdm && kind == SpotStreamKind::depth5 &&
                 key == "lastUpdateId") {
                 if (duplicate(
                         kLastUpdateIdBit,
@@ -958,8 +1011,8 @@ struct SpotPayloadParser::Impl {
                 result.event.depth.first_update_id =
                     result.event.depth.final_update_id;
             } else if (
-                (kind == SpotStreamKind::depth_diff && key == "b") ||
-                (kind == SpotStreamKind::depth5 && key == "bids")) {
+                (uses_depth_update_shape && key == "b") ||
+                (!uses_depth_update_shape && key == "bids")) {
                 if (duplicate(kBidsBit, SpotField::bids, value)) {
                     if (is_fatal_document_error(result.error)) {
                         return result;
@@ -984,8 +1037,8 @@ struct SpotPayloadParser::Impl {
                         error.error, error.field, error.decimal_error);
                 }
             } else if (
-                (kind == SpotStreamKind::depth_diff && key == "a") ||
-                (kind == SpotStreamKind::depth5 && key == "asks")) {
+                (uses_depth_update_shape && key == "a") ||
+                (!uses_depth_update_shape && key == "asks")) {
                 if (duplicate(kAsksBit, SpotField::asks, value)) {
                     if (is_fatal_document_error(result.error)) {
                         return result;
@@ -1028,32 +1081,41 @@ struct SpotPayloadParser::Impl {
         }
 
         const std::uint32_t required =
-            kind == SpotStreamKind::depth_diff ? kDiffRequired
-                                                : kPartialRequired;
+            is_usdm
+                ? kUsdMRequired
+                : (kind == SpotStreamKind::depth_diff
+                       ? kSpotDiffRequired
+                       : kSpotPartialRequired);
         if ((fields & required) != required) {
             result.error = SpotParseError::missing_field;
             if ((fields & kEventTypeBit) == 0U &&
-                kind == SpotStreamKind::depth_diff) {
+                uses_depth_update_shape) {
                 result.field = SpotField::event_type;
             } else if (
                 (fields & kEventTimeBit) == 0U &&
-                kind == SpotStreamKind::depth_diff) {
+                uses_depth_update_shape) {
                 result.field = SpotField::event_time;
             } else if (
+                (fields & kTransactionTimeBit) == 0U && is_usdm) {
+                result.field = SpotField::transaction_time;
+            } else if (
                 (fields & kSymbolBit) == 0U &&
-                kind == SpotStreamKind::depth_diff) {
+                uses_depth_update_shape) {
                 result.field = SpotField::symbol;
             } else if (
                 (fields & kFirstUpdateIdBit) == 0U &&
-                kind == SpotStreamKind::depth_diff) {
+                uses_depth_update_shape) {
                 result.field = SpotField::first_update_id;
             } else if (
                 (fields & kFinalUpdateIdBit) == 0U &&
-                kind == SpotStreamKind::depth_diff) {
+                uses_depth_update_shape) {
                 result.field = SpotField::final_update_id;
             } else if (
+                (fields & kPreviousUpdateIdBit) == 0U && is_usdm) {
+                result.field = SpotField::previous_update_id;
+            } else if (
                 (fields & kLastUpdateIdBit) == 0U &&
-                kind == SpotStreamKind::depth5) {
+                !is_usdm && kind == SpotStreamKind::depth5) {
                 result.field = SpotField::last_update_id;
             } else if ((fields & kBidsBit) == 0U) {
                 result.field = SpotField::bids;
@@ -1063,11 +1125,19 @@ struct SpotPayloadParser::Impl {
             return result;
         }
 
-        if (kind == SpotStreamKind::depth_diff &&
+        if (uses_depth_update_shape &&
             result.event.depth.first_update_id >
                 result.event.depth.final_update_id) {
             result.error = SpotParseError::invalid_update_range;
             result.field = SpotField::first_update_id;
+            return result;
+        }
+
+        if (is_usdm &&
+            result.event.depth.previous_update_id >=
+                result.event.depth.final_update_id) {
+            result.error = SpotParseError::invalid_update_range;
+            result.field = SpotField::previous_update_id;
             return result;
         }
 
@@ -1095,6 +1165,15 @@ SpotPayloadParser& SpotPayloadParser::operator=(
     SpotPayloadParser&&) noexcept = default;
 
 SpotParseResult SpotPayloadParser::parse(
+    const SpotStreamKind kind,
+    const std::string_view expected_symbol,
+    const PaddedJsonView payload) noexcept {
+    return parse(
+        PayloadVenue::spot, kind, expected_symbol, payload);
+}
+
+SpotParseResult SpotPayloadParser::parse(
+    const PayloadVenue venue,
     const SpotStreamKind kind,
     const std::string_view expected_symbol,
     const PaddedJsonView payload) noexcept {
@@ -1160,7 +1239,7 @@ SpotParseResult SpotPayloadParser::parse(
     if (kind == SpotStreamKind::trade) {
         return impl_->parse_trade(object, expected_symbol);
     }
-    return impl_->parse_depth(object, kind, expected_symbol);
+    return impl_->parse_depth(object, venue, kind, expected_symbol);
 }
 
 }  // namespace hft
