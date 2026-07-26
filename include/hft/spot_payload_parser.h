@@ -16,6 +16,11 @@ inline constexpr std::size_t kMaxJsonNestingDepth{64U};
 inline constexpr std::size_t kMaxDepthUpdates{16'384U};
 inline constexpr std::size_t kMaxPartialDepthLevelsPerSide{5U};
 
+enum class PayloadVenue : std::uint8_t {
+    spot,
+    usdm,
+};
+
 enum class SpotStreamKind : std::uint8_t {
     depth_diff,
     depth5,
@@ -56,9 +61,11 @@ enum class SpotField : std::uint8_t {
     root,
     event_type,
     event_time,
+    transaction_time,
     symbol,
     first_update_id,
     final_update_id,
+    previous_update_id,
     last_update_id,
     bids,
     asks,
@@ -100,6 +107,10 @@ struct LevelUpdateRange {
 struct SpotDepthEvent {
     bool has_event_time{false};
     std::uint64_t event_time_ms{0};
+    bool has_transaction_time{false};
+    std::uint64_t transaction_time_ms{0};
+    bool has_previous_update_id{false};
+    std::uint64_t previous_update_id{0};
     std::uint64_t first_update_id{0};
     std::uint64_t final_update_id{0};
     LevelUpdateRange bids{};
@@ -147,6 +158,11 @@ public:
     // Single-processing-thread component. All LevelUpdateRange values in a
     // result remain valid only until the next parse call on this instance.
     [[nodiscard]] SpotParseResult parse(
+        SpotStreamKind kind,
+        std::string_view expected_symbol,
+        PaddedJsonView payload) noexcept;
+    [[nodiscard]] SpotParseResult parse(
+        PayloadVenue venue,
         SpotStreamKind kind,
         std::string_view expected_symbol,
         PaddedJsonView payload) noexcept;
@@ -216,12 +232,16 @@ private:
             return "event_type";
         case SpotField::event_time:
             return "event_time";
+        case SpotField::transaction_time:
+            return "transaction_time";
         case SpotField::symbol:
             return "symbol";
         case SpotField::first_update_id:
             return "first_update_id";
         case SpotField::final_update_id:
             return "final_update_id";
+        case SpotField::previous_update_id:
+            return "previous_update_id";
         case SpotField::last_update_id:
             return "last_update_id";
         case SpotField::bids:

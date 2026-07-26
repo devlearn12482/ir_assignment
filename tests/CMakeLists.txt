@@ -4,6 +4,8 @@ add_executable(unit_tests
     spot_book_test.cpp
     spot_payload_parser_test.cpp
     unit_tests.cpp
+    usdm_book_test.cpp
+    usdm_payload_parser_test.cpp
 )
 
 target_include_directories(unit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

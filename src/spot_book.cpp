@@ -27,27 +27,27 @@ static_assert(kVisibleBookDepth == kMaxPartialDepthLevelsPerSide);
 
 }  // namespace
 
-bool SpotBookState::valid() const noexcept {
+bool TopFiveBookCore::valid() const noexcept {
     return valid_;
 }
 
-std::uint64_t SpotBookState::last_update_id() const noexcept {
+std::uint64_t TopFiveBookCore::last_update_id() const noexcept {
     return last_update_id_;
 }
 
-BookSideView SpotBookState::bids() const noexcept {
+BookSideView TopFiveBookCore::bids() const noexcept {
     return BookSideView{bids_.levels.data(), bids_.size};
 }
 
-BookSideView SpotBookState::asks() const noexcept {
+BookSideView TopFiveBookCore::asks() const noexcept {
     return BookSideView{asks_.levels.data(), asks_.size};
 }
 
-void SpotBookState::invalidate() noexcept {
+void TopFiveBookCore::invalidate() noexcept {
     valid_ = false;
 }
 
-std::size_t SpotBookState::find_price(
+std::size_t TopFiveBookCore::find_price(
     const Side& side,
     const std::int64_t price) noexcept {
     for (std::size_t index = 0; index < side.size; ++index) {
@@ -58,7 +58,7 @@ std::size_t SpotBookState::find_price(
     return side.size;
 }
 
-void SpotBookState::erase_level(
+void TopFiveBookCore::erase_level(
     Side& side,
     const std::size_t index) noexcept {
     assert(index < side.size);
@@ -71,7 +71,7 @@ void SpotBookState::erase_level(
     side.levels[side.size] = {};
 }
 
-void SpotBookState::insert_level(
+void TopFiveBookCore::insert_level(
     Side& side,
     const BookSide book_side,
     const BookLevel level) noexcept {
@@ -101,7 +101,7 @@ void SpotBookState::insert_level(
     }
 }
 
-SpotBookState::Side SpotBookState::make_refresh_side(
+TopFiveBookCore::Side TopFiveBookCore::make_refresh_side(
     const LevelUpdateRange updates,
     const BookSide side) noexcept {
     static_cast<void>(side);
@@ -119,7 +119,7 @@ SpotBookState::Side SpotBookState::make_refresh_side(
     return result;
 }
 
-SpotBookState::Side SpotBookState::apply_updates(
+TopFiveBookCore::Side TopFiveBookCore::apply_updates(
     const Side& original,
     const LevelUpdateRange updates,
     const BookSide side) noexcept {
@@ -161,14 +161,14 @@ SpotBookState::Side SpotBookState::apply_updates(
     return candidate;
 }
 
-bool SpotBookState::crossed(
+bool TopFiveBookCore::crossed(
     const Side& bids,
     const Side& asks) noexcept {
     return bids.size != 0U && asks.size != 0U &&
            bids.levels[0U].price >= asks.levels[0U].price;
 }
 
-SpotBookApplyResult SpotBookState::apply_refresh(
+SpotBookApplyResult TopFiveBookCore::apply_refresh(
     const SpotDepthEvent& event) noexcept {
     const std::uint64_t refresh_id = event.final_update_id;
     if (valid_ && refresh_id < last_update_id_) {
@@ -192,26 +192,9 @@ SpotBookApplyResult SpotBookState::apply_refresh(
         BookRowSide::neutral};
 }
 
-SpotBookApplyResult SpotBookState::apply_diff(
+SpotBookApplyResult TopFiveBookCore::apply_accepted_diff(
     const SpotDepthEvent& event) noexcept {
     const BookRowSide side = row_side(event);
-    if (!valid_) {
-        return SpotBookApplyResult{
-            SpotBookApplyStatus::ignored_while_invalid, side};
-    }
-
-    if (event.final_update_id <= last_update_id_) {
-        return SpotBookApplyResult{
-            SpotBookApplyStatus::stale_diff, side};
-    }
-
-    const std::uint64_t next_update_id = last_update_id_ + 1U;
-    if (event.first_update_id > next_update_id) {
-        invalidate();
-        return SpotBookApplyResult{
-            SpotBookApplyStatus::sequence_gap, side};
-    }
-
     const Side candidate_bids =
         apply_updates(bids_, event.bids, BookSide::bid);
     const Side candidate_asks =
@@ -227,6 +210,140 @@ SpotBookApplyResult SpotBookState::apply_diff(
     last_update_id_ = event.final_update_id;
     return SpotBookApplyResult{
         SpotBookApplyStatus::applied_diff, side};
+}
+
+bool SpotBookState::valid() const noexcept {
+    return book_.valid();
+}
+
+std::uint64_t SpotBookState::last_update_id() const noexcept {
+    return book_.last_update_id();
+}
+
+BookSideView SpotBookState::bids() const noexcept {
+    return book_.bids();
+}
+
+BookSideView SpotBookState::asks() const noexcept {
+    return book_.asks();
+}
+
+void SpotBookState::invalidate() noexcept {
+    book_.invalidate();
+}
+
+SpotBookApplyResult SpotBookState::apply_refresh(
+    const SpotDepthEvent& event) noexcept {
+    return book_.apply_refresh(event);
+}
+
+SpotBookApplyResult SpotBookState::apply_diff(
+    const SpotDepthEvent& event) noexcept {
+    const BookRowSide side = row_side(event);
+    if (!book_.valid()) {
+        return SpotBookApplyResult{
+            SpotBookApplyStatus::ignored_while_invalid, side};
+    }
+
+    if (event.final_update_id <= book_.last_update_id()) {
+        return SpotBookApplyResult{
+            SpotBookApplyStatus::stale_diff, side};
+    }
+
+    const std::uint64_t next_update_id =
+        book_.last_update_id() + 1U;
+    if (event.first_update_id > next_update_id) {
+        book_.invalidate();
+        return SpotBookApplyResult{
+            SpotBookApplyStatus::sequence_gap, side};
+    }
+
+    return book_.apply_accepted_diff(event);
+}
+
+bool UsdMBookState::valid() const noexcept {
+    return book_.valid();
+}
+
+std::uint64_t UsdMBookState::last_update_id() const noexcept {
+    return book_.last_update_id();
+}
+
+BookSideView UsdMBookState::bids() const noexcept {
+    return book_.bids();
+}
+
+BookSideView UsdMBookState::asks() const noexcept {
+    return book_.asks();
+}
+
+bool UsdMBookState::diff_chain_established() const noexcept {
+    return diff_chain_established_;
+}
+
+std::uint64_t UsdMBookState::previous_diff_update_id() const noexcept {
+    return previous_diff_update_id_;
+}
+
+void UsdMBookState::invalidate() noexcept {
+    book_.invalidate();
+    previous_diff_update_id_ = 0U;
+    diff_chain_established_ = false;
+}
+
+SpotBookApplyResult UsdMBookState::apply_refresh(
+    const SpotDepthEvent& event) noexcept {
+    const SpotBookApplyResult result = book_.apply_refresh(event);
+    if (result.status == SpotBookApplyStatus::applied_refresh) {
+        previous_diff_update_id_ = 0U;
+        diff_chain_established_ = false;
+    }
+    return result;
+}
+
+SpotBookApplyResult UsdMBookState::apply_diff(
+    const SpotDepthEvent& event) noexcept {
+    assert(event.has_previous_update_id);
+    const BookRowSide side = row_side(event);
+    if (!book_.valid()) {
+        return SpotBookApplyResult{
+            SpotBookApplyStatus::ignored_while_invalid, side};
+    }
+
+    if (diff_chain_established_) {
+        if (event.previous_update_id != previous_diff_update_id_) {
+            invalidate();
+            return SpotBookApplyResult{
+                SpotBookApplyStatus::sequence_gap, side};
+        }
+        if (event.final_update_id <= book_.last_update_id()) {
+            return SpotBookApplyResult{
+                SpotBookApplyStatus::stale_diff, side};
+        }
+    } else {
+        if (event.final_update_id <= book_.last_update_id()) {
+            return SpotBookApplyResult{
+                SpotBookApplyStatus::stale_diff, side};
+        }
+        const std::uint64_t next_update_id =
+            book_.last_update_id() + 1U;
+        if (event.first_update_id > next_update_id) {
+            invalidate();
+            return SpotBookApplyResult{
+                SpotBookApplyStatus::sequence_gap, side};
+        }
+    }
+
+    const SpotBookApplyResult result =
+        book_.apply_accepted_diff(event);
+    if (result.status == SpotBookApplyStatus::applied_diff) {
+        previous_diff_update_id_ = event.final_update_id;
+        diff_chain_established_ = true;
+    } else if (result.status == SpotBookApplyStatus::crossed_book) {
+        previous_diff_update_id_ = 0U;
+        diff_chain_established_ = false;
+    }
+    return result;
 }
 
 }  // namespace hft
