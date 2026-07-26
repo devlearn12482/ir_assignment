@@ -77,6 +77,34 @@ void expect_error(
     return json;
 }
 
+[[nodiscard]] std::string nested_array(
+    const std::size_t container_count) {
+    std::string json(container_count, '[');
+    json.push_back('0');
+    json.append(container_count, ']');
+    return json;
+}
+
+[[nodiscard]] std::string object_with_nested_unknown_array(
+    const std::size_t total_container_depth) {
+    std::string json = R"({"x":)";
+    json += nested_array(total_container_depth - 1U);
+    json.push_back('}');
+    return json;
+}
+
+[[nodiscard]] std::string object_with_nested_unknown_objects(
+    const std::size_t total_container_depth) {
+    std::string json;
+    json.reserve((total_container_depth * 6U) + 1U);
+    for (std::size_t depth = 0; depth < total_container_depth; ++depth) {
+        json += R"({"x":)";
+    }
+    json.push_back('0');
+    json.append(total_container_depth, '}');
+    return json;
+}
+
 void test_valid_differential(Context& context, SpotPayloadParser& parser) {
     constexpr std::string_view json = R"({
         "a":[["101.00000000","2.5"]],
@@ -350,6 +378,107 @@ void test_json_syntax_classification(
             maximum_ids.event.depth.final_update_id ==
                 18'446'744'073'709'551'615ULL,
         "maximum uint64 event and update IDs are accepted exactly");
+}
+
+void test_json_nesting_limit(
+    Context& context,
+    SpotPayloadParser& parser) {
+    const std::string exact_object_array =
+        object_with_nested_unknown_array(kMaxJsonNestingDepth);
+    const SpotParseResult exact_object_array_result = parse(
+        parser, SpotStreamKind::trade, exact_object_array);
+    context.expect(
+        exact_object_array_result.has_value(),
+        "object payload at the 64-container nesting limit is accepted");
+
+    expect_error(
+        context,
+        parser,
+        SpotStreamKind::trade,
+        object_with_nested_unknown_array(kMaxJsonNestingDepth + 1U),
+        SpotParseError::json_nesting_too_deep,
+        SpotField::root,
+        "object payload above the nesting limit");
+
+    const std::string exact_object_chain =
+        object_with_nested_unknown_objects(kMaxJsonNestingDepth);
+    const SpotParseResult exact_object_chain_result = parse(
+        parser, SpotStreamKind::trade, exact_object_chain);
+    context.expect(
+        exact_object_chain_result.has_value(),
+        "nested object chain at the 64-container limit is accepted");
+
+    expect_error(
+        context,
+        parser,
+        SpotStreamKind::trade,
+        object_with_nested_unknown_objects(kMaxJsonNestingDepth + 1U),
+        SpotParseError::json_nesting_too_deep,
+        SpotField::root,
+        "nested object chain above the nesting limit");
+
+    expect_error(
+        context,
+        parser,
+        SpotStreamKind::trade,
+        nested_array(kMaxJsonNestingDepth),
+        SpotParseError::root_not_object,
+        SpotField::root,
+        "non-object root at the nesting limit");
+    expect_error(
+        context,
+        parser,
+        SpotStreamKind::trade,
+        nested_array(kMaxJsonNestingDepth + 1U),
+        SpotParseError::json_nesting_too_deep,
+        SpotField::root,
+        "non-object root above the nesting limit");
+
+    std::string depth_after_schema_error =
+        R"({"e":7,"tail":)";
+    depth_after_schema_error +=
+        nested_array(kMaxJsonNestingDepth);
+    depth_after_schema_error.push_back('}');
+    expect_error(
+        context,
+        parser,
+        SpotStreamKind::depth_diff,
+        depth_after_schema_error,
+        SpotParseError::json_nesting_too_deep,
+        SpotField::root,
+        "nesting violation after an earlier schema error");
+
+    std::string nested_trade_discriminator = R"({"e":)";
+    nested_trade_discriminator +=
+        nested_array(kMaxJsonNestingDepth);
+    nested_trade_discriminator.push_back('}');
+    expect_error(
+        context,
+        parser,
+        SpotStreamKind::trade,
+        nested_trade_discriminator,
+        SpotParseError::json_nesting_too_deep,
+        SpotField::root,
+        "over-nested optional trade discriminator");
+
+    const SpotParseResult recovery =
+        parse(parser, SpotStreamKind::trade, R"({"x":0})");
+    context.expect(
+        recovery.has_value(),
+        "parser accepts the next valid message after a nesting rejection");
+
+    std::string malformed_below_limit = R"({"x":)";
+    malformed_below_limit += nested_array(8U);
+    malformed_below_limit.pop_back();
+    malformed_below_limit += "tru}";
+    expect_error(
+        context,
+        parser,
+        SpotStreamKind::trade,
+        malformed_below_limit,
+        SpotParseError::malformed_json,
+        SpotField::root,
+        "malformed JSON below the nesting limit");
 }
 
 void test_document_and_required_fields(
@@ -697,6 +826,7 @@ void run_spot_payload_parser_tests(Context& context) {
     test_valid_partial_depth(context, parser);
     test_trade_audit_policy(context, parser);
     test_json_syntax_classification(context, parser);
+    test_json_nesting_limit(context, parser);
     test_document_and_required_fields(context, parser);
     test_scalar_validation(context, parser);
     test_level_validation(context, parser);

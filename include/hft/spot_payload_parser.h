@@ -11,6 +11,8 @@ namespace hft {
 
 inline constexpr std::size_t kMaxPayloadBytes{1024U * 1024U};
 inline constexpr std::size_t kJsonPaddingBytes{64U};
+// Number of simultaneously open JSON arrays/objects, including the root.
+inline constexpr std::size_t kMaxJsonNestingDepth{64U};
 inline constexpr std::size_t kMaxDepthUpdates{16'384U};
 inline constexpr std::size_t kMaxPartialDepthLevelsPerSide{5U};
 
@@ -29,6 +31,7 @@ enum class SpotParseError : std::uint8_t {
     none,
     invalid_input_buffer,
     payload_too_large,
+    json_nesting_too_deep,
     malformed_json,
     root_not_object,
     missing_field,
@@ -162,6 +165,8 @@ private:
             return "invalid_input_buffer";
         case SpotParseError::payload_too_large:
             return "payload_too_large";
+        case SpotParseError::json_nesting_too_deep:
+            return "json_nesting_too_deep";
         case SpotParseError::malformed_json:
             return "malformed_json";
         case SpotParseError::root_not_object:

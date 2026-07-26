@@ -12,8 +12,13 @@ namespace {
 
 constexpr std::size_t kDuplicateTableSize{32'768U};
 constexpr std::size_t kDuplicateTableMask{kDuplicateTableSize - 1U};
+constexpr std::size_t kSimdjsonMaxDepth{kMaxJsonNestingDepth + 8U};
+constexpr std::size_t kRootFieldContainerDepth{2U};
+constexpr std::size_t kLevelContainerDepth{3U};
+constexpr std::size_t kLevelComponentContainerDepth{4U};
 
 static_assert(kJsonPaddingBytes == simdjson::SIMDJSON_PADDING);
+static_assert(kSimdjsonMaxDepth > kMaxJsonNestingDepth);
 static_assert((kDuplicateTableSize & kDuplicateTableMask) == 0U);
 static_assert(kDuplicateTableSize >= (kMaxDepthUpdates * 2U));
 
@@ -32,6 +37,24 @@ struct ParseFailure {
     const SpotField field,
     const DecimalParseError decimal_error = DecimalParseError::none) noexcept {
     return ParseFailure{error, field, decimal_error};
+}
+
+[[nodiscard]] SpotParseError classify_json_error(
+    const simdjson::error_code error) noexcept {
+    return error == simdjson::DEPTH_ERROR
+               ? SpotParseError::json_nesting_too_deep
+               : SpotParseError::malformed_json;
+}
+
+[[nodiscard]] ParseFailure fail_json(
+    const simdjson::error_code error) noexcept {
+    return fail(classify_json_error(error), SpotField::root);
+}
+
+[[nodiscard]] bool is_fatal_document_error(
+    const SpotParseError error) noexcept {
+    return error == SpotParseError::malformed_json ||
+           error == SpotParseError::json_nesting_too_deep;
 }
 
 [[nodiscard]] bool equals_ascii_case_insensitive(
@@ -159,7 +182,8 @@ struct ParseFailure {
 }
 
 [[nodiscard]] simdjson::error_code validate_json_value(
-    simdjson::ondemand::value& value) noexcept {
+    simdjson::ondemand::value& value,
+    const std::size_t container_depth) noexcept {
     simdjson::ondemand::json_type type;
     simdjson::error_code error = value.type().get(type);
     if (error != simdjson::SUCCESS) {
@@ -168,6 +192,9 @@ struct ParseFailure {
 
     switch (type) {
         case simdjson::ondemand::json_type::array: {
+            if (container_depth > kMaxJsonNestingDepth) {
+                return simdjson::DEPTH_ERROR;
+            }
             simdjson::ondemand::array array;
             error = value.get_array().get(array);
             if (error != simdjson::SUCCESS) {
@@ -179,7 +206,8 @@ struct ParseFailure {
                 if (error != simdjson::SUCCESS) {
                     return error;
                 }
-                error = validate_json_value(child);
+                error =
+                    validate_json_value(child, container_depth + 1U);
                 if (error != simdjson::SUCCESS) {
                     return error;
                 }
@@ -187,6 +215,9 @@ struct ParseFailure {
             return simdjson::SUCCESS;
         }
         case simdjson::ondemand::json_type::object: {
+            if (container_depth > kMaxJsonNestingDepth) {
+                return simdjson::DEPTH_ERROR;
+            }
             simdjson::ondemand::object object;
             error = value.get_object().get(object);
             if (error != simdjson::SUCCESS) {
@@ -204,7 +235,8 @@ struct ParseFailure {
                     return error;
                 }
                 static_cast<void>(key);
-                error = validate_json_value(field.value());
+                error = validate_json_value(
+                    field.value(), container_depth + 1U);
                 if (error != simdjson::SUCCESS) {
                     return error;
                 }
@@ -251,7 +283,8 @@ struct ParseFailure {
                 if (error != simdjson::SUCCESS) {
                     return error;
                 }
-                error = validate_json_value(child);
+                error = validate_json_value(
+                    child, kRootFieldContainerDepth);
                 if (error != simdjson::SUCCESS) {
                     return error;
                 }
@@ -288,20 +321,19 @@ struct ParseFailure {
     simdjson::ondemand::json_type type;
     simdjson::error_code error = value.type().get(type);
     if (error != simdjson::SUCCESS) {
-        return fail(SpotParseError::malformed_json, SpotField::root);
+        return fail_json(error);
     }
     if (type != simdjson::ondemand::json_type::string) {
-        error = validate_json_value(value);
+        error =
+            validate_json_value(value, kRootFieldContainerDepth);
         return error == simdjson::SUCCESS
                    ? fail(SpotParseError::wrong_type, field)
-                   : fail(
-                         SpotParseError::malformed_json,
-                         SpotField::root);
+                   : fail_json(error);
     }
     error = value.get_string().get(output);
     return error == simdjson::SUCCESS
                ? ParseFailure{}
-               : fail(SpotParseError::malformed_json, SpotField::root);
+               : fail_json(error);
 }
 
 [[nodiscard]] ParseFailure read_json_uint64(
@@ -311,15 +343,14 @@ struct ParseFailure {
     simdjson::ondemand::json_type type;
     simdjson::error_code error = value.type().get(type);
     if (error != simdjson::SUCCESS) {
-        return fail(SpotParseError::malformed_json, SpotField::root);
+        return fail_json(error);
     }
     if (type != simdjson::ondemand::json_type::number) {
-        error = validate_json_value(value);
+        error =
+            validate_json_value(value, kRootFieldContainerDepth);
         return error == simdjson::SUCCESS
                    ? fail(SpotParseError::wrong_type, field)
-                   : fail(
-                         SpotParseError::malformed_json,
-                         SpotField::root);
+                   : fail_json(error);
     }
 
     error = value.get_uint64().get(output);
@@ -328,7 +359,7 @@ struct ParseFailure {
     }
     return is_schema_conversion_error(error)
                ? fail(SpotParseError::wrong_type, field)
-               : fail(SpotParseError::malformed_json, SpotField::root);
+               : fail_json(error);
 }
 
 }  // namespace
@@ -354,7 +385,8 @@ struct SpotPayloadParser::Impl {
     std::size_t encountered_levels{0};
 
     Impl() {
-        const simdjson::error_code error = parser.allocate(kMaxPayloadBytes);
+        const simdjson::error_code error =
+            parser.allocate(kMaxPayloadBytes, kSimdjsonMaxDepth);
         if (error != simdjson::SUCCESS) {
             throw std::runtime_error{"unable to preallocate Spot JSON parser"};
         }
@@ -420,13 +452,13 @@ struct SpotPayloadParser::Impl {
         simdjson::error_code json_error =
             value.type().get(levels_type);
         if (json_error != simdjson::SUCCESS) {
-            return fail(SpotParseError::malformed_json, SpotField::root);
+            return fail_json(json_error);
         }
         if (levels_type != simdjson::ondemand::json_type::array) {
-            json_error = validate_json_value(value);
+            json_error = validate_json_value(
+                value, kRootFieldContainerDepth);
             if (json_error != simdjson::SUCCESS) {
-                return fail(
-                    SpotParseError::malformed_json, SpotField::root);
+                return fail_json(json_error);
             }
             return fail(SpotParseError::wrong_type, side_field);
         }
@@ -434,7 +466,7 @@ struct SpotPayloadParser::Impl {
         simdjson::ondemand::array levels;
         json_error = value.get_array().get(levels);
         if (json_error != simdjson::SUCCESS) {
-            return fail(SpotParseError::malformed_json, SpotField::root);
+            return fail_json(json_error);
         }
 
         const std::size_t start = update_count;
@@ -446,8 +478,7 @@ struct SpotPayloadParser::Impl {
             simdjson::ondemand::value level_value;
             json_error = std::move(level_result).get(level_value);
             if (json_error != simdjson::SUCCESS) {
-                return fail(
-                    SpotParseError::malformed_json, SpotField::root);
+                return fail_json(json_error);
             }
 
             const bool over_capacity =
@@ -458,11 +489,10 @@ struct SpotPayloadParser::Impl {
             ++side_level_count;
             if (over_capacity) {
                 record_error(SpotParseError::too_many_levels, side_field);
-                json_error = validate_json_value(level_value);
+                json_error = validate_json_value(
+                    level_value, kLevelContainerDepth);
                 if (json_error != simdjson::SUCCESS) {
-                    return fail(
-                        SpotParseError::malformed_json,
-                        SpotField::root);
+                    return fail_json(json_error);
                 }
                 continue;
             }
@@ -470,18 +500,16 @@ struct SpotPayloadParser::Impl {
             simdjson::ondemand::json_type level_type;
             json_error = level_value.type().get(level_type);
             if (json_error != simdjson::SUCCESS) {
-                return fail(
-                    SpotParseError::malformed_json, SpotField::root);
+                return fail_json(json_error);
             }
             if (level_type != simdjson::ondemand::json_type::array) {
                 record_error(
                     SpotParseError::invalid_level_shape,
                     SpotField::level);
-                json_error = validate_json_value(level_value);
+                json_error = validate_json_value(
+                    level_value, kLevelContainerDepth);
                 if (json_error != simdjson::SUCCESS) {
-                    return fail(
-                        SpotParseError::malformed_json,
-                        SpotField::root);
+                    return fail_json(json_error);
                 }
                 continue;
             }
@@ -489,8 +517,7 @@ struct SpotPayloadParser::Impl {
             simdjson::ondemand::array pair;
             json_error = level_value.get_array().get(pair);
             if (json_error != simdjson::SUCCESS) {
-                return fail(
-                    SpotParseError::malformed_json, SpotField::root);
+                return fail_json(json_error);
             }
 
             std::string_view price_text;
@@ -502,9 +529,7 @@ struct SpotPayloadParser::Impl {
                 json_error =
                     std::move(component_result).get(component_value);
                 if (json_error != simdjson::SUCCESS) {
-                    return fail(
-                        SpotParseError::malformed_json,
-                        SpotField::root);
+                    return fail_json(json_error);
                 }
 
                 if (component_count >= 2U) {
@@ -512,11 +537,12 @@ struct SpotPayloadParser::Impl {
                         SpotParseError::invalid_level_shape,
                         SpotField::level);
                     components_valid = false;
-                    json_error = validate_json_value(component_value);
+                    json_error =
+                        validate_json_value(
+                            component_value,
+                            kLevelComponentContainerDepth);
                     if (json_error != simdjson::SUCCESS) {
-                        return fail(
-                            SpotParseError::malformed_json,
-                            SpotField::root);
+                        return fail_json(json_error);
                     }
                     ++component_count;
                     continue;
@@ -525,9 +551,7 @@ struct SpotPayloadParser::Impl {
                 simdjson::ondemand::json_type component_type;
                 json_error = component_value.type().get(component_type);
                 if (json_error != simdjson::SUCCESS) {
-                    return fail(
-                        SpotParseError::malformed_json,
-                        SpotField::root);
+                    return fail_json(json_error);
                 }
                 if (component_type !=
                     simdjson::ondemand::json_type::string) {
@@ -536,11 +560,12 @@ struct SpotPayloadParser::Impl {
                         component_count == 0U ? SpotField::price
                                               : SpotField::quantity);
                     components_valid = false;
-                    json_error = validate_json_value(component_value);
+                    json_error =
+                        validate_json_value(
+                            component_value,
+                            kLevelComponentContainerDepth);
                     if (json_error != simdjson::SUCCESS) {
-                        return fail(
-                            SpotParseError::malformed_json,
-                            SpotField::root);
+                        return fail_json(json_error);
                     }
                     ++component_count;
                     continue;
@@ -550,9 +575,7 @@ struct SpotPayloadParser::Impl {
                 json_error =
                     component_value.get_string().get(component);
                 if (json_error != simdjson::SUCCESS) {
-                    return fail(
-                        SpotParseError::malformed_json,
-                        SpotField::root);
+                    return fail_json(json_error);
                 }
                 if (component_count == 0U) {
                     price_text = component;
@@ -651,16 +674,19 @@ struct SpotPayloadParser::Impl {
 
         for (auto field_result : object) {
             simdjson::ondemand::field field;
-            if (std::move(field_result).get(field) != simdjson::SUCCESS) {
-                result.error = SpotParseError::malformed_json;
+            const simdjson::error_code field_error =
+                std::move(field_result).get(field);
+            if (field_error != simdjson::SUCCESS) {
+                result.error = classify_json_error(field_error);
                 result.field = SpotField::root;
                 return result;
             }
 
             std::string_view key;
-            if (field.unescaped_key(false).get(key) !=
-                simdjson::SUCCESS) {
-                result.error = SpotParseError::malformed_json;
+            const simdjson::error_code key_error =
+                field.unescaped_key(false).get(key);
+            if (key_error != simdjson::SUCCESS) {
+                result.error = classify_json_error(key_error);
                 result.field = SpotField::root;
                 return result;
             }
@@ -670,10 +696,9 @@ struct SpotPayloadParser::Impl {
                 std::string_view event_type;
                 const ParseFailure value_error = read_json_string(
                     field.value(), event_type, SpotField::event_type);
-                if (value_error.error ==
-                    SpotParseError::malformed_json) {
-                    result.error = SpotParseError::malformed_json;
-                    result.field = SpotField::root;
+                if (is_fatal_document_error(value_error.error)) {
+                    result.error = value_error.error;
+                    result.field = value_error.field;
                     return result;
                 }
                 result.event.trade.event_type_matches =
@@ -685,10 +710,9 @@ struct SpotPayloadParser::Impl {
                 std::string_view symbol;
                 const ParseFailure value_error = read_json_string(
                     field.value(), symbol, SpotField::symbol);
-                if (value_error.error ==
-                    SpotParseError::malformed_json) {
-                    result.error = SpotParseError::malformed_json;
-                    result.field = SpotField::root;
+                if (is_fatal_document_error(value_error.error)) {
+                    result.error = value_error.error;
+                    result.field = value_error.field;
                     return result;
                 }
                 result.event.trade.symbol_matches =
@@ -696,9 +720,12 @@ struct SpotPayloadParser::Impl {
                     !value_error.failed() &&
                     equals_ascii_case_insensitive(symbol, expected_symbol);
             } else {
-                if (validate_json_value(field.value()) !=
-                    simdjson::SUCCESS) {
-                    result.error = SpotParseError::malformed_json;
+                const simdjson::error_code validation_error =
+                    validate_json_value(
+                        field.value(), kRootFieldContainerDepth);
+                if (validation_error != simdjson::SUCCESS) {
+                    result.error =
+                        classify_json_error(validation_error);
                     result.field = SpotField::root;
                     return result;
                 }
@@ -748,7 +775,7 @@ struct SpotPayloadParser::Impl {
             if (!error.failed()) {
                 return false;
             }
-            if (error.error == SpotParseError::malformed_json) {
+            if (is_fatal_document_error(error.error)) {
                 result.error = error.error;
                 result.field = error.field;
                 result.decimal_error = error.decimal_error;
@@ -768,8 +795,11 @@ struct SpotPayloadParser::Impl {
                 return false;
             }
             record_error(SpotParseError::duplicate_field, field);
-            if (validate_json_value(value) != simdjson::SUCCESS) {
-                result.error = SpotParseError::malformed_json;
+            const simdjson::error_code validation_error =
+                validate_json_value(
+                    value, kRootFieldContainerDepth);
+            if (validation_error != simdjson::SUCCESS) {
+                result.error = classify_json_error(validation_error);
                 result.field = SpotField::root;
                 result.decimal_error = DecimalParseError::none;
             }
@@ -778,16 +808,19 @@ struct SpotPayloadParser::Impl {
 
         for (auto field_result : object) {
             simdjson::ondemand::field field;
-            if (std::move(field_result).get(field) != simdjson::SUCCESS) {
-                result.error = SpotParseError::malformed_json;
+            const simdjson::error_code field_error =
+                std::move(field_result).get(field);
+            if (field_error != simdjson::SUCCESS) {
+                result.error = classify_json_error(field_error);
                 result.field = SpotField::root;
                 return result;
             }
 
             std::string_view key;
-            if (field.unescaped_key(false).get(key) !=
-                simdjson::SUCCESS) {
-                result.error = SpotParseError::malformed_json;
+            const simdjson::error_code key_error =
+                field.unescaped_key(false).get(key);
+            if (key_error != simdjson::SUCCESS) {
+                result.error = classify_json_error(key_error);
                 result.field = SpotField::root;
                 return result;
             }
@@ -796,7 +829,7 @@ struct SpotPayloadParser::Impl {
             if (kind == SpotStreamKind::depth_diff && key == "e") {
                 if (duplicate(
                         kEventTypeBit, SpotField::event_type, value)) {
-                    if (result.error == SpotParseError::malformed_json) {
+                    if (is_fatal_document_error(result.error)) {
                         return result;
                     }
                     continue;
@@ -805,7 +838,7 @@ struct SpotPayloadParser::Impl {
                 const ParseFailure value_error = read_json_string(
                     value, event_type, SpotField::event_type);
                 if (apply_failure(value_error)) {
-                    if (result.error == SpotParseError::malformed_json) {
+                    if (is_fatal_document_error(result.error)) {
                         return result;
                     }
                     continue;
@@ -819,7 +852,7 @@ struct SpotPayloadParser::Impl {
                 kind == SpotStreamKind::depth_diff && key == "E") {
                 if (duplicate(
                         kEventTimeBit, SpotField::event_time, value)) {
-                    if (result.error == SpotParseError::malformed_json) {
+                    if (is_fatal_document_error(result.error)) {
                         return result;
                     }
                     continue;
@@ -829,7 +862,7 @@ struct SpotPayloadParser::Impl {
                     result.event.depth.event_time_ms,
                     SpotField::event_time);
                 if (apply_failure(value_error)) {
-                    if (result.error == SpotParseError::malformed_json) {
+                    if (is_fatal_document_error(result.error)) {
                         return result;
                     }
                     continue;
@@ -838,7 +871,7 @@ struct SpotPayloadParser::Impl {
             } else if (
                 kind == SpotStreamKind::depth_diff && key == "s") {
                 if (duplicate(kSymbolBit, SpotField::symbol, value)) {
-                    if (result.error == SpotParseError::malformed_json) {
+                    if (is_fatal_document_error(result.error)) {
                         return result;
                     }
                     continue;
@@ -847,7 +880,7 @@ struct SpotPayloadParser::Impl {
                 const ParseFailure value_error = read_json_string(
                     value, symbol, SpotField::symbol);
                 if (apply_failure(value_error)) {
-                    if (result.error == SpotParseError::malformed_json) {
+                    if (is_fatal_document_error(result.error)) {
                         return result;
                     }
                     continue;
@@ -864,7 +897,7 @@ struct SpotPayloadParser::Impl {
                         kFirstUpdateIdBit,
                         SpotField::first_update_id,
                         value)) {
-                    if (result.error == SpotParseError::malformed_json) {
+                    if (is_fatal_document_error(result.error)) {
                         return result;
                     }
                     continue;
@@ -874,7 +907,7 @@ struct SpotPayloadParser::Impl {
                     result.event.depth.first_update_id,
                     SpotField::first_update_id);
                 if (apply_failure(value_error)) {
-                    if (result.error == SpotParseError::malformed_json) {
+                    if (is_fatal_document_error(result.error)) {
                         return result;
                     }
                     continue;
@@ -885,7 +918,7 @@ struct SpotPayloadParser::Impl {
                         kFinalUpdateIdBit,
                         SpotField::final_update_id,
                         value)) {
-                    if (result.error == SpotParseError::malformed_json) {
+                    if (is_fatal_document_error(result.error)) {
                         return result;
                     }
                     continue;
@@ -895,7 +928,7 @@ struct SpotPayloadParser::Impl {
                     result.event.depth.final_update_id,
                     SpotField::final_update_id);
                 if (apply_failure(value_error)) {
-                    if (result.error == SpotParseError::malformed_json) {
+                    if (is_fatal_document_error(result.error)) {
                         return result;
                     }
                     continue;
@@ -907,7 +940,7 @@ struct SpotPayloadParser::Impl {
                         kLastUpdateIdBit,
                         SpotField::last_update_id,
                         value)) {
-                    if (result.error == SpotParseError::malformed_json) {
+                    if (is_fatal_document_error(result.error)) {
                         return result;
                     }
                     continue;
@@ -917,7 +950,7 @@ struct SpotPayloadParser::Impl {
                     result.event.depth.final_update_id,
                     SpotField::last_update_id);
                 if (apply_failure(value_error)) {
-                    if (result.error == SpotParseError::malformed_json) {
+                    if (is_fatal_document_error(result.error)) {
                         return result;
                     }
                     continue;
@@ -928,7 +961,7 @@ struct SpotPayloadParser::Impl {
                 (kind == SpotStreamKind::depth_diff && key == "b") ||
                 (kind == SpotStreamKind::depth5 && key == "bids")) {
                 if (duplicate(kBidsBit, SpotField::bids, value)) {
-                    if (result.error == SpotParseError::malformed_json) {
+                    if (is_fatal_document_error(result.error)) {
                         return result;
                     }
                     continue;
@@ -939,7 +972,7 @@ struct SpotPayloadParser::Impl {
                     kind == SpotStreamKind::depth5,
                     result.event.depth.bids);
                 if (error.failed()) {
-                    if (error.error == SpotParseError::malformed_json ||
+                    if (is_fatal_document_error(error.error) ||
                         error.error ==
                             SpotParseError::internal_capacity_error) {
                         result.error = error.error;
@@ -954,7 +987,7 @@ struct SpotPayloadParser::Impl {
                 (kind == SpotStreamKind::depth_diff && key == "a") ||
                 (kind == SpotStreamKind::depth5 && key == "asks")) {
                 if (duplicate(kAsksBit, SpotField::asks, value)) {
-                    if (result.error == SpotParseError::malformed_json) {
+                    if (is_fatal_document_error(result.error)) {
                         return result;
                     }
                     continue;
@@ -965,7 +998,7 @@ struct SpotPayloadParser::Impl {
                     kind == SpotStreamKind::depth5,
                     result.event.depth.asks);
                 if (error.failed()) {
-                    if (error.error == SpotParseError::malformed_json ||
+                    if (is_fatal_document_error(error.error) ||
                         error.error ==
                             SpotParseError::internal_capacity_error) {
                         result.error = error.error;
@@ -977,8 +1010,12 @@ struct SpotPayloadParser::Impl {
                         error.error, error.field, error.decimal_error);
                 }
             } else {
-                if (validate_json_value(value) != simdjson::SUCCESS) {
-                    result.error = SpotParseError::malformed_json;
+                const simdjson::error_code validation_error =
+                    validate_json_value(
+                        value, kRootFieldContainerDepth);
+                if (validation_error != simdjson::SUCCESS) {
+                    result.error =
+                        classify_json_error(validation_error);
                     result.field = SpotField::root;
                     result.decimal_error = DecimalParseError::none;
                     return result;
@@ -1085,7 +1122,7 @@ SpotParseResult SpotPayloadParser::parse(
             .iterate(payload.data, payload.size, payload.capacity)
             .get(document);
     if (iterate_error != simdjson::SUCCESS) {
-        result.error = SpotParseError::malformed_json;
+        result.error = classify_json_error(iterate_error);
         result.field = SpotField::root;
         return result;
     }
@@ -1094,7 +1131,7 @@ SpotParseResult SpotPayloadParser::parse(
     const simdjson::error_code type_error =
         document.type().get(root_type);
     if (type_error != simdjson::SUCCESS) {
-        result.error = SpotParseError::malformed_json;
+        result.error = classify_json_error(type_error);
         result.field = SpotField::root;
         return result;
     }
@@ -1106,7 +1143,7 @@ SpotParseResult SpotPayloadParser::parse(
                 std::string_view{payload.data, payload.size});
         result.error = validation_error == simdjson::SUCCESS
                            ? SpotParseError::root_not_object
-                           : SpotParseError::malformed_json;
+                           : classify_json_error(validation_error);
         result.field = SpotField::root;
         return result;
     }
@@ -1115,7 +1152,7 @@ SpotParseResult SpotPayloadParser::parse(
     const simdjson::error_code object_error =
         document.get_object().get(object);
     if (object_error != simdjson::SUCCESS) {
-        result.error = SpotParseError::malformed_json;
+        result.error = classify_json_error(object_error);
         result.field = SpotField::root;
         return result;
     }

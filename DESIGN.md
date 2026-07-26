@@ -143,6 +143,7 @@ This table records load-bearing resolutions, including reversals of earlier draf
 | Trade integration | Keep trades audit-only; they never update the diff-based book or emit an order-book row | 2026-07-26 | The subscribed trade stream does not provide depth-delta semantics |
 | Binary WebSocket messages | Reject, invalidate, and reconnect; count them in the shared message-policy termination breaker | 2026-07-26 | Binance market-data streams are text; persistent binary or over-limit traffic must not create an unbounded reconnect loop |
 | Generic JSON numbers | Validate number-token grammar without converting unknown/additive values into a bounded C++ numeric representation; convert only typed venue fields | 2026-07-26 | Audit eligibility depends on syntactic JSON validity, so a valid token such as `1e400` must not be rejected merely because it exceeds a parser numeric type |
+| JSON nesting | Accept at most 64 simultaneously open arrays/objects, including the payload root; enforce the limit in project code rather than relying on simdjson development assertions | 2026-07-26 | The 1 MiB byte limit alone permits enough nesting to exhaust the native stack, while simdjson On-Demand depth checks are not a release-build policy boundary |
 
 ## 4. System context
 
@@ -497,6 +498,7 @@ Trades are audit-only, so these documented payload shapes are not acceptance sch
 - Pass that source view to the low-level buffer overload `simdjson::minify(const char*, size_t, char*, size_t&)`, writing directly into the shared padded payload scratch. A minification error is a malformed-payload rejection and produces no audit row. Never call the templated DOM/element `minify` or serialize a DOM value.
 - Lexical minification removes only insignificant JSON whitespace. It preserves key order, duplicate keys, number lexemes such as `1e3` versus `1000`, and original string escape spelling; the resulting bytes therefore satisfy the audit contract without semantic normalization.
 - Parse the minified scratch with the shared payload On-Demand parser and require its root to be an object. Iterate fields once in source order, match keys without allocating, fill a reusable typed event scratch area, and track required/duplicate fields with bit masks. Accumulate schema errors without publishing or mutating state until the complete object traversal has established syntactic validity.
+- Count every open JSON array or object, including the payload root, and reject a value before descending into container depth 65. The recursive generic-field validator therefore uses at most 64 project stack frames. The payload parser is preallocated with modest extra internal depth headroom so the project guard, not a simdjson development assertion, owns the exact release behavior.
 - Generic syntax traversal validates JSON number lexemes without materializing them into `double`, `int64_t`, or `uint64_t`, so representation limits do not change audit eligibility. Typed IDs, prices, and quantities still use their separately documented exact conversions and bounds.
 - After successful object traversal, RFC-escape the already-minified scratch directly into the acquired ring-slot audit buffer before applying the per-kind schema result.
 - Live necessarily performs one stage-one scan of the combined envelope, one lexical minification scan, and one payload parse. The payload bytes are therefore structurally scanned by the envelope and payload parsers; this is an explicit correctness/performance trade-off for byte-faithful audit output and a shared replay parser, and its cost must be measured.
@@ -856,6 +858,7 @@ The verification gate compares regenerated order-book output byte-for-byte with 
 | Complete binary WebSocket data message | Consume `conn_seq`; count complete message, binary pre-audit rejection, and message-policy termination; invalidate all symbols; reconnect unless this is the fatal third breaker increment; no audit row |
 | Unknown envelope stream | Count/log; no audit row or mutation |
 | Malformed envelope or invalid/non-object inner JSON | Count/log; `conn_seq` remains consumed; no audit row |
+| Payload JSON exceeds 64 open arrays/objects | Controlled pre-audit parser-policy rejection with no audit row; invalidate the envelope-routed symbol for differential depth and preserve existing state/validity for an independent partial refresh or audit-only trade; replay fails the row with nesting-limit context |
 | Syntactically valid differential-depth JSON with invalid venue schema | Write audit row, count/log, invalidate the envelope-routed symbol, emit no snapshot |
 | Trade discriminator or symbol diagnostic mismatch | Write audit row, count/log, preserve book validity, emit no snapshot |
 | Payload/envelope symbol mismatch on differential depth | Write audit row, count/log, invalidate the envelope-routed symbol, emit no snapshot |
@@ -931,6 +934,7 @@ The design favors a truthful bounded partial book over a heap-heavy structure th
 | Constructed WebSocket target | 8192 bytes | Configuration failure before connection |
 | Inbound WebSocket logical-message read limit | 1 MiB | Connection-fatal: count as a message-policy termination, invalidate all symbols, close, and reconnect; the third binary/oversize termination in any combination before a published audit row is process-fatal |
 | Inner `data` JSON object | Never larger than its 1 MiB enclosing message | Audit error if the complete envelope is available but `data` is invalid/non-object |
+| Payload JSON nesting | 64 simultaneously open arrays/objects, including the root | Controlled pre-audit parser-policy rejection; never descend into depth 65 |
 | Decoded replay `payload_json` field | 1 MiB | Fatal replay row error |
 | Updates in one differential-depth event | 16,384 combined bid/ask entries | Audit/schema error; invalidate the routed symbol; never truncate |
 | Formatted live or replay CSV record | 3 MiB | Fatal row error before publication; never truncate |
@@ -976,6 +980,7 @@ Implementation and tests must preserve these invariants:
 28. WebSocket ping handling has one owner: Beast emits the automatic pong and the passive control callback never sends a second response.
 29. Binary-message rejection and an over-limit logical message increment one shared process-level message-policy breaker across reconnects; only publication of an audit row resets it, and the third increment before a reset is fatal.
 30. The production client neither offers nor negotiates `permessage-deflate`; accepted market-data payloads are uncompressed text messages.
+31. JSON validation never descends into a 65th simultaneously open array/object; release, development-check, and sanitizer builds classify the same boundary without assertion failure or unbounded recursion.
 
 ## 22. Correctness and market-data evidence contract
 
@@ -1238,7 +1243,7 @@ Pure configuration tests cover:
 - Exactly 96 derived streams at 32 symbols and all-or-nothing rejection above the bound.
 - No output-directory creation, file opening, parser/buffer allocation, writer-thread start, resolver construction, or socket construction after any configuration rejection.
 
-Runtime/replay boundary tests cover exact-limit and one-over-limit cases for the 1 MiB inbound WebSocket logical-message read limit and decoded replay payload, 16,384 combined updates, 3 MiB logical/formatted record, and both 4096-record/64 MiB queue bounds. Each test asserts the documented error policy, full counter visibility, and no truncation or unbounded growth.
+Runtime/replay boundary tests cover exact-limit and one-over-limit cases for the 1 MiB inbound WebSocket logical-message read limit and decoded replay payload, 64-container JSON nesting limit, 16,384 combined updates, 3 MiB logical/formatted record, and both 4096-record/64 MiB queue bounds. JSON nesting cases include array and object chains, non-object roots, a violation after an earlier schema error, parser reuse after rejection, and identical classification in release, simdjson-development-check, and sanitizer builds. Each test asserts the documented error policy, full counter visibility, and no truncation or unbounded growth.
 
 ### 26.4 README evidence
 
