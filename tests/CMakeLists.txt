@@ -1,4 +1,5 @@
 add_executable(unit_tests
+    csv_formatter_test.cpp
     fixed_point_test.cpp
     simdjson_contract_test.cpp
     spot_book_test.cpp
