@@ -45,18 +45,14 @@ public:
         return FileCloseResult{true, 0};
     }
 
-    [[nodiscard]] bool remove(
+    [[nodiscard]] FileRemoveResult remove(
         const std::string& path) noexcept override {
-        return ::unlink(path.c_str()) == 0;
+        if (::unlink(path.c_str()) != 0) {
+            return FileRemoveResult{false, errno};
+        }
+        return FileRemoveResult{true, 0};
     }
 };
-
-[[nodiscard]] std::shared_ptr<FileOperations>
-default_file_operations() {
-    static const std::shared_ptr<FileOperations> operations{
-        std::make_shared<PosixFileOperations>()};
-    return operations;
-}
 
 [[nodiscard]] constexpr std::string_view header_for(
     const CsvFileKind kind) noexcept {
@@ -70,6 +66,12 @@ default_file_operations() {
 }
 
 }  // namespace
+
+std::shared_ptr<FileOperations> posix_file_operations() {
+    static const std::shared_ptr<FileOperations> operations{
+        std::make_shared<PosixFileOperations>()};
+    return operations;
+}
 
 BufferedCsvFileSink::BufferedCsvFileSink(
     std::string path,
@@ -87,7 +89,7 @@ BufferedCsvFileSink::open_exclusive(
     FileSinkError& error) noexcept {
     try {
         return open_exclusive(
-            std::move(path), kind, default_file_operations(), error);
+            std::move(path), kind, posix_file_operations(), error);
     } catch (const std::bad_alloc&) {
         error = FileSinkError{
             FileSinkErrorCode::allocation_failure, 0};
@@ -131,17 +133,35 @@ BufferedCsvFileSink::open_exclusive(
         sink.reset(new BufferedCsvFileSink{
             path, opened.descriptor, operations});
     } catch (const std::bad_alloc&) {
-        static_cast<void>(operations->close(opened.descriptor));
-        static_cast<void>(operations->remove(path));
         error = FileSinkError{
             FileSinkErrorCode::allocation_failure, 0};
+        const FileCloseResult close_result =
+            operations->close(opened.descriptor);
+        const FileRemoveResult remove_result =
+            operations->remove(path);
+        if (!close_result.success) {
+            error.cleanup_operation =
+                FileSinkCleanupOperation::close;
+            error.cleanup_native_error =
+                close_result.native_error;
+        } else if (!remove_result.success &&
+                   remove_result.native_error != ENOENT) {
+            error.cleanup_operation =
+                FileSinkCleanupOperation::remove;
+            error.cleanup_native_error =
+                remove_result.native_error;
+        }
         return nullptr;
     }
 
     const FileSinkError header_error = sink->write_all(header);
     if (header_error) {
         error = header_error;
-        sink->close_after_failed_open();
+        const FileSinkError cleanup =
+            sink->close_after_failed_open();
+        error.cleanup_operation = cleanup.cleanup_operation;
+        error.cleanup_native_error =
+            cleanup.cleanup_native_error;
         return nullptr;
     }
     return sink;
@@ -312,11 +332,29 @@ FileSinkError BufferedCsvFileSink::latch_error(
     return first_error_;
 }
 
-void BufferedCsvFileSink::close_after_failed_open() noexcept {
+FileSinkError BufferedCsvFileSink::close_after_failed_open() noexcept {
     const int descriptor = descriptor_;
     descriptor_ = -1;
-    static_cast<void>(operations_->close(descriptor));
-    static_cast<void>(operations_->remove(path_));
+    const FileCloseResult close_result =
+        operations_->close(descriptor);
+    const FileRemoveResult remove_result =
+        operations_->remove(path_);
+    if (!close_result.success) {
+        return FileSinkError{
+            FileSinkErrorCode::none,
+            0,
+            FileSinkCleanupOperation::close,
+            close_result.native_error};
+    }
+    if (!remove_result.success &&
+        remove_result.native_error != ENOENT) {
+        return FileSinkError{
+            FileSinkErrorCode::none,
+            0,
+            FileSinkCleanupOperation::remove,
+            remove_result.native_error};
+    }
+    return {};
 }
 
 }  // namespace hft
