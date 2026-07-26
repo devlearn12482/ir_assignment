@@ -135,7 +135,8 @@ This table records load-bearing resolutions, including reversals of earlier draf
 
 | Resolution | Decision | Date | Basis |
 |---|---|---|---|
-| USD-M combined-stream route | Reversed the earlier assumption that `/public` contradicted the authoritative route; production uses `wss://fstream.binance.com/public/stream?streams=` | 2026-07-26 | Assignment requirement, current official routed-stream documentation, and endpoint/payload verification recorded on 2026-07-25 |
+| USD-M combined-stream route | Reversed the earlier assumption that `/public` contradicted the authoritative depth route; production uses `wss://fstream.binance.com/public/stream?streams=` | 2026-07-26 | Assignment requirement and current official routed depth-stream documentation |
+| USD-M individual trade discrepancy | Preserve the assignment's raw `<symbol>@trade` subscription and do not substitute `<symbol>@aggTrade`; record live compatibility evidence in the README | 2026-07-26 | The current official catalog lists aggregate trades under `/market` but no longer lists the PDF-mandated individual trade under `/public`; substitution would change semantics and cannot be made silently |
 | simdjson version | Reversed the proposed repin to 3.10.1; deliberately retain vendored 3.6.4 | 2026-07-26 | The pinned headers provide On-Demand `value::raw_json()` and the output-buffer `minify` overload; section 22.1 makes both APIs and byte behavior a dependency-contract test |
 | Beast compression mechanism | Reversed the proposed `BOOST_BEAST_NO_ZLIB` macro because it is not a Beast 1.74 facility; instantiate `websocket::stream<NextLayer, false>` | 2026-07-26 | Pinned Beast 1.74 interface and handshake test proving that `permessage-deflate` is not offered |
 | Production endpoint configuration | Removed the earlier production `--base-url` plan; use centralized fixed constants with test-only verified-TLS injection | 2026-07-26 | Narrow grading interface, bounded configuration surface, and explicit acceptance of rebuild/redeployment on endpoint migration |
@@ -473,7 +474,7 @@ The documented expected fields are:
 
 ### 9.6 USD-M trade
 
-The assignment mandates raw `<symbol>@trade` on the USD-M `/public` route. The current live payload shape, verified against that endpoint on 2026-07-25, includes:
+The assignment mandates raw `<symbol>@trade` on the USD-M `/public` route. The current official catalog no longer documents that individual stream and instead documents `<symbol>@aggTrade` under `/market`; aggregate trade is not a semantics-preserving replacement. The baseline therefore retains the grading contract below and requires the final live evidence/README to state whether the assignment endpoint still accepts it. The assignment's expected raw trade payload includes:
 
 - `e`: string equal to `"trade"`.
 - `E`: non-negative integer event time.

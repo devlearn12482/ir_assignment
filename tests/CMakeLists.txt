@@ -6,6 +6,8 @@ add_executable(unit_tests
     event_processor_test.cpp
     event_processor_robustness_test.cpp
     fixed_point_test.cpp
+    live_envelope_test.cpp
+    live_subscription_test.cpp
     market_data_replay_test.cpp
     simdjson_contract_test.cpp
     spot_book_test.cpp

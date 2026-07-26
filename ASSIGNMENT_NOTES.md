@@ -31,7 +31,8 @@ Working safety limit: accept at most 32 configured symbols on the baseline conne
   - Spot: `wss://stream.binance.com:9443/stream?streams=`
   - USD-M: `wss://fstream.binance.com/public/stream?streams=`
 - The document explicitly notes that raw `@trade` for USD-M is on the `/public` path and directs the candidate to the Binance derivatives documentation.
-- Current official USD-M documentation defines routed `/public`, `/market`, and `/private` endpoints and shows high-frequency depth streams on `/public/stream`. The PDF's `/public` form is therefore consistent with the current official documentation; the older unrouted form remains backward-compatible only for streams classified as Public.
+- Current official USD-M documentation defines routed `/public`, `/market`, and `/private` endpoints and shows high-frequency depth streams on `/public/stream`, so the PDF's depth route is consistent with the current catalog.
+- Upstream discrepancy recorded on 2026-07-26: the current USD-M catalog does not list an individual `<symbol>@trade` stream. It lists `<symbol>@aggTrade` under `/market`, while the assignment explicitly mandates raw `<symbol>@trade` on `/public`. The submission preserves the assignment contract and must not silently substitute aggregate trades, because that changes event semantics. Live verification must record whether the assignment stream remains accepted; if it is no longer served, the README must name the upstream incompatibility precisely.
 - Keep venue endpoint and routed-path selection centralized and overridable for controlled testing; do not scatter URL literals through networking code. The README should state the production endpoints used and the date/current documentation against which they were verified.
 - Combined stream names must use the lowercase symbol in the URL.
 - Required suffixes per symbol:
