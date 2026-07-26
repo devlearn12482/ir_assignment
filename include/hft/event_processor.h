@@ -77,6 +77,7 @@ struct EventProcessResult {
 };
 
 class EventProcessor;
+struct EventProcessorTestAccess;
 
 class SymbolState {
 public:
@@ -116,6 +117,7 @@ private:
     UsdMBookState usdm_book_{};
 
     friend class EventProcessor;
+    friend struct EventProcessorTestAccess;
 };
 
 // Returns false and leaves next unchanged when current is UINT64_MAX.
