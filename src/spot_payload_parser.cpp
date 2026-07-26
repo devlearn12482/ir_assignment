@@ -1,5 +1,7 @@
 #include "hft/spot_payload_parser.h"
 
+#include "json_validation.h"
+
 #include <simdjson.h>
 
 #include <array>
@@ -108,211 +110,8 @@ struct ParseFailure {
     return value;
 }
 
-[[nodiscard]] bool is_json_digit(const char value) noexcept {
-    return value >= '0' && value <= '9';
-}
-
-[[nodiscard]] bool is_valid_json_number_token(
-    const std::string_view token) noexcept {
-    std::size_t index{0};
-    if (index < token.size() && token[index] == '-') {
-        ++index;
-    }
-    if (index == token.size()) {
-        return false;
-    }
-
-    if (token[index] == '0') {
-        ++index;
-        if (index < token.size() && is_json_digit(token[index])) {
-            return false;
-        }
-    } else {
-        if (token[index] < '1' || token[index] > '9') {
-            return false;
-        }
-        do {
-            ++index;
-        } while (index < token.size() && is_json_digit(token[index]));
-    }
-
-    if (index < token.size() && token[index] == '.') {
-        ++index;
-        const std::size_t fraction_start = index;
-        while (index < token.size() && is_json_digit(token[index])) {
-            ++index;
-        }
-        if (index == fraction_start) {
-            return false;
-        }
-    }
-
-    if (index < token.size() &&
-        (token[index] == 'e' || token[index] == 'E')) {
-        ++index;
-        if (index < token.size() &&
-            (token[index] == '+' || token[index] == '-')) {
-            ++index;
-        }
-        const std::size_t exponent_start = index;
-        while (index < token.size() && is_json_digit(token[index])) {
-            ++index;
-        }
-        if (index == exponent_start) {
-            return false;
-        }
-    }
-
-    return index == token.size();
-}
-
-[[nodiscard]] std::string_view trim_json_whitespace(
-    std::string_view input) noexcept {
-    const auto is_whitespace = [](const char value) noexcept {
-        return value == ' ' || value == '\t' || value == '\n' ||
-               value == '\r';
-    };
-    while (!input.empty() && is_whitespace(input.front())) {
-        input.remove_prefix(1U);
-    }
-    while (!input.empty() && is_whitespace(input.back())) {
-        input.remove_suffix(1U);
-    }
-    return input;
-}
-
-[[nodiscard]] simdjson::error_code validate_json_value(
-    simdjson::ondemand::value& value,
-    const std::size_t container_depth) noexcept {
-    simdjson::ondemand::json_type type;
-    simdjson::error_code error = value.type().get(type);
-    if (error != simdjson::SUCCESS) {
-        return error;
-    }
-
-    switch (type) {
-        case simdjson::ondemand::json_type::array: {
-            if (container_depth > kMaxJsonNestingDepth) {
-                return simdjson::DEPTH_ERROR;
-            }
-            simdjson::ondemand::array array;
-            error = value.get_array().get(array);
-            if (error != simdjson::SUCCESS) {
-                return error;
-            }
-            for (auto child_result : array) {
-                simdjson::ondemand::value child;
-                error = std::move(child_result).get(child);
-                if (error != simdjson::SUCCESS) {
-                    return error;
-                }
-                error =
-                    validate_json_value(child, container_depth + 1U);
-                if (error != simdjson::SUCCESS) {
-                    return error;
-                }
-            }
-            return simdjson::SUCCESS;
-        }
-        case simdjson::ondemand::json_type::object: {
-            if (container_depth > kMaxJsonNestingDepth) {
-                return simdjson::DEPTH_ERROR;
-            }
-            simdjson::ondemand::object object;
-            error = value.get_object().get(object);
-            if (error != simdjson::SUCCESS) {
-                return error;
-            }
-            for (auto field_result : object) {
-                simdjson::ondemand::field field;
-                error = std::move(field_result).get(field);
-                if (error != simdjson::SUCCESS) {
-                    return error;
-                }
-                std::string_view key;
-                error = field.unescaped_key(false).get(key);
-                if (error != simdjson::SUCCESS) {
-                    return error;
-                }
-                static_cast<void>(key);
-                error = validate_json_value(
-                    field.value(), container_depth + 1U);
-                if (error != simdjson::SUCCESS) {
-                    return error;
-                }
-            }
-            return simdjson::SUCCESS;
-        }
-        case simdjson::ondemand::json_type::number: {
-            return is_valid_json_number_token(value.raw_json_token())
-                       ? simdjson::SUCCESS
-                       : simdjson::NUMBER_ERROR;
-        }
-        case simdjson::ondemand::json_type::string: {
-            std::string_view string;
-            return value.get_string().get(string);
-        }
-        case simdjson::ondemand::json_type::boolean: {
-            bool boolean{false};
-            return value.get_bool().get(boolean);
-        }
-        case simdjson::ondemand::json_type::null: {
-            return value.raw_json_token() == "null"
-                       ? simdjson::SUCCESS
-                       : simdjson::N_ATOM_ERROR;
-        }
-    }
-    return simdjson::UNEXPECTED_ERROR;
-}
-
-[[nodiscard]] simdjson::error_code validate_non_object_document(
-    simdjson::ondemand::document& document,
-    const simdjson::ondemand::json_type type,
-    const std::string_view source) noexcept {
-    switch (type) {
-        case simdjson::ondemand::json_type::array: {
-            simdjson::ondemand::array array;
-            simdjson::error_code error =
-                document.get_array().get(array);
-            if (error != simdjson::SUCCESS) {
-                return error;
-            }
-            for (auto child_result : array) {
-                simdjson::ondemand::value child;
-                error = std::move(child_result).get(child);
-                if (error != simdjson::SUCCESS) {
-                    return error;
-                }
-                error = validate_json_value(
-                    child, kRootFieldContainerDepth);
-                if (error != simdjson::SUCCESS) {
-                    return error;
-                }
-            }
-            return simdjson::SUCCESS;
-        }
-        case simdjson::ondemand::json_type::number:
-            return is_valid_json_number_token(
-                       trim_json_whitespace(source))
-                       ? simdjson::SUCCESS
-                       : simdjson::NUMBER_ERROR;
-        case simdjson::ondemand::json_type::string: {
-            std::string_view string;
-            return document.get_string(false).get(string);
-        }
-        case simdjson::ondemand::json_type::boolean: {
-            bool boolean{false};
-            return document.get_bool().get(boolean);
-        }
-        case simdjson::ondemand::json_type::null:
-            return trim_json_whitespace(source) == "null"
-                       ? simdjson::SUCCESS
-                       : simdjson::N_ATOM_ERROR;
-        case simdjson::ondemand::json_type::object:
-            return simdjson::UNEXPECTED_ERROR;
-    }
-    return simdjson::UNEXPECTED_ERROR;
-}
+using detail::is_valid_json_number_token;
+using detail::validate_json_value;
 
 [[nodiscard]] ParseFailure read_json_string(
     simdjson::ondemand::value& value,
@@ -1216,10 +1015,11 @@ SpotParseResult SpotPayloadParser::parse(
     }
     if (root_type != simdjson::ondemand::json_type::object) {
         const simdjson::error_code validation_error =
-            validate_non_object_document(
+            detail::validate_non_object_document(
                 document,
                 root_type,
-                std::string_view{payload.data, payload.size});
+                std::string_view{payload.data, payload.size},
+                kRootFieldContainerDepth);
         result.error = validation_error == simdjson::SUCCESS
                            ? SpotParseError::root_not_object
                            : classify_json_error(validation_error);
