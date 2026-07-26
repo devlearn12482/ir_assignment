@@ -1,0 +1,7 @@
+recv_tsec,recv_tnsec,venue,stream_kind,shard_id,conn_epoch,conn_seq,symbol,payload_json
+1700000000,100,spot,depth5,0,0,1,BTCUSDT,"{""lastUpdateId"":100,""bids"":[[""100"",""1""]],""asks"":[[""101"",""1""]]}"
+1700000000,200,spot,depth_diff,0,0,2,BTCUSDT,"{""e"":""depthUpdate"",""E"":2,""s"":""BTCUSDT"",""U"":101,""u"":101,""b"":[[""100"",""2""]],""a"":[]}"
+1700000000,300,spot,depth_diff,0,0,3,BTCUSDT,"{""e"":""depthUpdate"",""E"":3,""s"":""BTCUSDT"",""U"":100,""u"":100,""b"":[],""a"":[]}"
+1700000000,400,spot,depth_diff,0,0,4,BTCUSDT,"{""e"":""depthUpdate"",""E"":4,""s"":""BTCUSDT"",""U"":103,""u"":103,""b"":[],""a"":[]}"
+1700000000,500,spot,trade,0,0,5,BTCUSDT,"{""e"":""trade"",""s"":""BTCUSDT"",""p"":""100"",""q"":""1""}"
+1700000000,600,spot,depth5,0,0,6,BTCUSDT,"{""lastUpdateId"":200,""bids"":[[""99"",""3""]],""asks"":[[""102"",""4""]]}"

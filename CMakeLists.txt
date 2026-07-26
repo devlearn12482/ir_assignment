@@ -43,6 +43,7 @@ add_library(hft_core STATIC
     src/csv_output_set.cpp
     src/event_processor.cpp
     src/fixed_point.cpp
+    src/market_data_replay.cpp
     src/spot_book.cpp
     src/spot_payload_parser.cpp
     src/symbol_identity.cpp

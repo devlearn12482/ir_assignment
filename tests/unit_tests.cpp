@@ -10,6 +10,7 @@ int main() {
     hft::test::run_symbol_identity_tests(context);
     hft::test::run_simdjson_contract_tests(context);
     hft::test::run_fixed_point_tests(context);
+    hft::test::run_market_data_replay_tests(context);
     hft::test::run_spot_payload_parser_tests(context);
     hft::test::run_spot_book_tests(context);
     hft::test::run_usdm_payload_parser_tests(context);

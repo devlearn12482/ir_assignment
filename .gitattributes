@@ -14,3 +14,4 @@ CMakeLists.txt text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
 *.csv text eol=lf
+testdata/replay/SHA256SUMS text eol=lf
