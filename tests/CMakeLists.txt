@@ -16,7 +16,15 @@ add_executable(unit_tests
     unit_tests.cpp
     usdm_book_test.cpp
     usdm_payload_parser_test.cpp
+    verified_websocket_session_test.cpp
 )
+
+add_executable(
+    tls_session_integration_test
+    tls_session_integration_test.cpp
+)
+target_link_libraries(tls_session_integration_test PRIVATE hft_core)
+hft_enable_project_warnings(tls_session_integration_test)
 
 target_include_directories(unit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_definitions(
@@ -42,6 +50,18 @@ foreach(configuration Debug Release RelWithDebInfo MinSizeRel)
 endforeach()
 
 add_test(NAME unit_tests COMMAND unit_tests)
+
+find_program(HFT_OPENSSL_EXECUTABLE openssl REQUIRED)
+add_test(
+    NAME verified_tls_websocket
+    COMMAND
+        "${CMAKE_COMMAND}"
+        -DTEST_EXECUTABLE=$<TARGET_FILE:tls_session_integration_test>
+        -DOPENSSL_EXECUTABLE=${HFT_OPENSSL_EXECUTABLE}
+        -DBINARY_DIR=${CMAKE_BINARY_DIR}
+        -P
+        "${CMAKE_CURRENT_SOURCE_DIR}/run_tls_session_integration.cmake"
+)
 
 add_test(
     NAME replay_cli

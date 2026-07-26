@@ -7,6 +7,10 @@ project(
     LANGUAGES CXX
 )
 
+find_package(Boost 1.74 REQUIRED COMPONENTS system)
+find_package(OpenSSL REQUIRED)
+find_package(Threads REQUIRED)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -50,6 +54,7 @@ add_library(hft_core STATIC
     src/spot_book.cpp
     src/spot_payload_parser.cpp
     src/symbol_identity.cpp
+    src/verified_websocket_session.cpp
 )
 
 target_compile_features(hft_core PUBLIC cxx_std_17)
@@ -78,7 +83,16 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(simdjson_vendor PRIVATE -w)
 endif()
 
-target_link_libraries(hft_core PRIVATE simdjson::simdjson)
+target_link_libraries(
+    hft_core
+    PUBLIC
+        Boost::system
+        OpenSSL::Crypto
+        OpenSSL::SSL
+        Threads::Threads
+    PRIVATE
+        simdjson::simdjson
+)
 
 add_executable(binance_capture src/main.cpp)
 target_link_libraries(binance_capture PRIVATE hft_core simdjson::simdjson)
@@ -100,7 +114,10 @@ if(BUILD_TESTING)
             "${CMAKE_CTEST_COMMAND}"
             ${hft_ctest_configuration}
             --output-on-failure
-        DEPENDS unit_tests binance_capture
+        DEPENDS
+            unit_tests
+            binance_capture
+            tls_session_integration_test
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
         USES_TERMINAL
         COMMENT "Running baseline unit tests"
