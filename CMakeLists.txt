@@ -38,6 +38,7 @@ function(hft_enable_project_warnings target)
 endfunction()
 
 add_library(hft_core STATIC
+    src/buffered_file_sink.cpp
     src/csv_formatter.cpp
     src/event_processor.cpp
     src/fixed_point.cpp
