@@ -4,6 +4,7 @@
 
 int main() {
     hft::test::Context context;
+    hft::test::run_csv_formatter_tests(context);
     hft::test::run_simdjson_contract_tests(context);
     hft::test::run_fixed_point_tests(context);
     hft::test::run_spot_payload_parser_tests(context);

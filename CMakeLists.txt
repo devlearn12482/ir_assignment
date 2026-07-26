@@ -38,6 +38,7 @@ function(hft_enable_project_warnings target)
 endfunction()
 
 add_library(hft_core STATIC
+    src/csv_formatter.cpp
     src/fixed_point.cpp
     src/spot_book.cpp
     src/spot_payload_parser.cpp
