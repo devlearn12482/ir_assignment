@@ -201,6 +201,157 @@ void test_trade_audit_policy(Context& context, SpotPayloadParser& parser) {
         "malformed optional trade discriminator");
 }
 
+void test_json_syntax_classification(
+    Context& context,
+    SpotPayloadParser& parser) {
+    struct RootCase {
+        std::string_view json;
+        SpotParseError error;
+        std::string_view message;
+    };
+    constexpr std::array root_cases{
+        RootCase{"true", SpotParseError::root_not_object,
+                 "valid Boolean root"},
+        RootCase{"null", SpotParseError::root_not_object,
+                 "valid null root"},
+        RootCase{"123", SpotParseError::root_not_object,
+                 "valid integer root"},
+        RootCase{"1e400", SpotParseError::root_not_object,
+                 "valid out-of-range numeric root"},
+        RootCase{" \t1e400\r\n", SpotParseError::root_not_object,
+                 "valid numeric root with JSON whitespace"},
+        RootCase{R"("text")", SpotParseError::root_not_object,
+                 "valid string root"},
+        RootCase{"[1e400]", SpotParseError::root_not_object,
+                 "valid array root with large number"},
+        RootCase{"tru", SpotParseError::malformed_json,
+                 "invalid Boolean root"},
+        RootCase{"nul", SpotParseError::malformed_json,
+                 "invalid null root"},
+        RootCase{"01", SpotParseError::malformed_json,
+                 "leading-zero numeric root"},
+        RootCase{"1.", SpotParseError::malformed_json,
+                 "missing number fraction root"},
+        RootCase{"1e", SpotParseError::malformed_json,
+                 "missing number exponent root"},
+        RootCase{"--1", SpotParseError::malformed_json,
+                 "double-sign numeric root"},
+        RootCase{"NaN", SpotParseError::malformed_json,
+                 "non-JSON NaN root"},
+        RootCase{"Infinity", SpotParseError::malformed_json,
+                 "non-JSON infinity root"},
+        RootCase{"[tru]", SpotParseError::malformed_json,
+                 "invalid atom inside array root"},
+        RootCase{"true false", SpotParseError::malformed_json,
+                 "trailing content after Boolean root"},
+        RootCase{"[1] true", SpotParseError::malformed_json,
+                 "trailing content after array root"},
+        RootCase{R"({"x":1} true)", SpotParseError::malformed_json,
+                 "trailing content after object root"},
+    };
+
+    for (const RootCase& test_case : root_cases) {
+        expect_error(
+            context,
+            parser,
+            SpotStreamKind::trade,
+            test_case.json,
+            test_case.error,
+            SpotField::root,
+            test_case.message);
+    }
+
+    constexpr std::array valid_additive_numbers{
+        std::string_view{R"({"x":0})"},
+        std::string_view{R"({"x":-0})"},
+        std::string_view{R"({"x":0.0})"},
+        std::string_view{R"({"x":-0.125})"},
+        std::string_view{R"({"x":1e0})"},
+        std::string_view{R"({"x":1E+20})"},
+        std::string_view{R"({"x":1e-20})"},
+        std::string_view{R"({"x":1e400})"},
+        std::string_view{R"({"x":-1e99999})"},
+        std::string_view{
+            R"({"x":1234567890123456789012345678901234567890})"},
+        std::string_view{R"({"x":[1e400,{"y":-1e99999}]})"},
+    };
+    for (const std::string_view json : valid_additive_numbers) {
+        const SpotParseResult result =
+            parse(parser, SpotStreamKind::trade, json);
+        context.expect(
+            result.has_value(),
+            "valid representation-independent additive number is auditable");
+    }
+
+    constexpr std::array invalid_additive_numbers{
+        std::string_view{R"({"x":01})"},
+        std::string_view{R"({"x":1.})"},
+        std::string_view{R"({"x":.1})"},
+        std::string_view{R"({"x":1e})"},
+        std::string_view{R"({"x":1e+})"},
+        std::string_view{R"({"x":--1})"},
+        std::string_view{R"({"x":nul})"},
+        std::string_view{R"({"x":[0,{"y":1e-}]})"},
+    };
+    for (const std::string_view json : invalid_additive_numbers) {
+        expect_error(
+            context,
+            parser,
+            SpotStreamKind::trade,
+            json,
+            SpotParseError::malformed_json,
+            SpotField::root,
+            "malformed additive JSON number");
+    }
+
+    const SpotParseResult trade_wrong_type = parse(
+        parser, SpotStreamKind::trade, R"({"e":1e400})");
+    context.expect(
+        trade_wrong_type.has_value() &&
+            trade_wrong_type.event.trade.event_type_present &&
+            !trade_wrong_type.event.trade.event_type_matches,
+        "valid large number in optional trade discriminator is a mismatch");
+
+    expect_error(
+        context,
+        parser,
+        SpotStreamKind::depth_diff,
+        R"({"e":1e400,"E":1,"s":"BTCUSDT","U":1,"u":1,"b":[],"a":[]})",
+        SpotParseError::wrong_type,
+        SpotField::event_type,
+        "large valid number with wrong discriminator type");
+    expect_error(
+        context,
+        parser,
+        SpotStreamKind::depth_diff,
+        R"({"e":"depthUpdate","E":1,"s":"BTCUSDT","U":1,"u":1,"b":1e400,"a":[]})",
+        SpotParseError::wrong_type,
+        SpotField::bids,
+        "large valid number with wrong levels type");
+
+    const SpotParseResult additive_depth = parse(
+        parser,
+        SpotStreamKind::depth_diff,
+        R"({"e":"depthUpdate","E":1,"s":"BTCUSDT","U":1,"u":1,"b":[],"a":[],"future":1e400})");
+    context.expect(
+        additive_depth.has_value(),
+        "valid large additive number does not invalidate depth schema");
+
+    const SpotParseResult maximum_ids = parse(
+        parser,
+        SpotStreamKind::depth_diff,
+        R"({"e":"depthUpdate","E":18446744073709551615,"s":"BTCUSDT","U":18446744073709551615,"u":18446744073709551615,"b":[],"a":[]})");
+    context.expect(
+        maximum_ids.has_value() &&
+            maximum_ids.event.depth.event_time_ms ==
+                18'446'744'073'709'551'615ULL &&
+            maximum_ids.event.depth.first_update_id ==
+                18'446'744'073'709'551'615ULL &&
+            maximum_ids.event.depth.final_update_id ==
+                18'446'744'073'709'551'615ULL,
+        "maximum uint64 event and update IDs are accepted exactly");
+}
+
 void test_document_and_required_fields(
     Context& context,
     SpotPayloadParser& parser) {
@@ -545,6 +696,7 @@ void run_spot_payload_parser_tests(Context& context) {
     test_valid_differential(context, parser);
     test_valid_partial_depth(context, parser);
     test_trade_audit_policy(context, parser);
+    test_json_syntax_classification(context, parser);
     test_document_and_required_fields(context, parser);
     test_scalar_validation(context, parser);
     test_level_validation(context, parser);
