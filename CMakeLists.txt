@@ -39,6 +39,7 @@ endfunction()
 
 add_library(hft_core STATIC
     src/fixed_point.cpp
+    src/spot_payload_parser.cpp
 )
 
 target_compile_features(hft_core PUBLIC cxx_std_17)
@@ -66,6 +67,8 @@ if(MSVC)
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(simdjson_vendor PRIVATE -w)
 endif()
+
+target_link_libraries(hft_core PRIVATE simdjson::simdjson)
 
 include(CTest)
 
