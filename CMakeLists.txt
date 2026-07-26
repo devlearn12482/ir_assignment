@@ -39,6 +39,7 @@ endfunction()
 
 add_library(hft_core STATIC
     src/fixed_point.cpp
+    src/spot_book.cpp
     src/spot_payload_parser.cpp
 )
 
