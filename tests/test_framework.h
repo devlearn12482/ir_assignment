@@ -23,10 +23,12 @@ private:
 };
 
 void run_csv_formatter_tests(Context& context);
+void run_event_processor_tests(Context& context);
 void run_fixed_point_tests(Context& context);
 void run_simdjson_contract_tests(Context& context);
 void run_spot_book_tests(Context& context);
 void run_spot_payload_parser_tests(Context& context);
+void run_symbol_identity_tests(Context& context);
 void run_usdm_book_tests(Context& context);
 void run_usdm_payload_parser_tests(Context& context);
 

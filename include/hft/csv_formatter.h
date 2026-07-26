@@ -49,6 +49,8 @@ struct MarketDataCsvRow {
     PayloadVenue venue{PayloadVenue::spot};
     SpotStreamKind stream_kind{SpotStreamKind::depth_diff};
     std::uint32_t shard_id{0};
+    // connection_epoch starts at zero. connection_sequence is one-based
+    // within (shard_id, connection_epoch) and zero is always invalid.
     std::uint64_t connection_epoch{0};
     std::uint64_t connection_sequence{0};
     // The routing layer supplies normalized [A-Z0-9]{1,32} bytes. The

@@ -1,4 +1,5 @@
 #include "hft/csv_formatter.h"
+#include "hft/symbol_identity.h"
 
 #include <algorithm>
 #include <array>
@@ -16,8 +17,6 @@ namespace {
 
 inline constexpr std::uint32_t kNanosecondsPerSecond{
     1'000'000'000U};
-inline constexpr std::size_t kMaximumSymbolBytes{32U};
-
 [[nodiscard]] bool append_bytes(
     std::string& output,
     const std::string_view bytes) {
@@ -86,21 +85,6 @@ template <typename Integer>
 [[nodiscard]] bool valid_timestamp(
     const CsvTimestamp timestamp) noexcept {
     return timestamp.nanoseconds < kNanosecondsPerSecond;
-}
-
-[[nodiscard]] bool valid_symbol(
-    const std::string_view symbol) noexcept {
-    if (symbol.empty() || symbol.size() > kMaximumSymbolBytes) {
-        return false;
-    }
-    for (const char byte : symbol) {
-        const bool uppercase = byte >= 'A' && byte <= 'Z';
-        const bool digit = byte >= '0' && byte <= '9';
-        if (!uppercase && !digit) {
-            return false;
-        }
-    }
-    return true;
 }
 
 [[nodiscard]] std::string_view venue_text(
@@ -262,7 +246,7 @@ CsvFormatError format_market_data_csv_row(
     if (row.connection_sequence == 0U) {
         return CsvFormatError::invalid_sequence;
     }
-    if (!valid_symbol(row.symbol)) {
+    if (!is_normalized_symbol(row.symbol)) {
         return CsvFormatError::invalid_symbol;
     }
     const std::string_view venue = venue_text(row.venue);
