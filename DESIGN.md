@@ -824,6 +824,8 @@ Ordered shutdown:
 10. Join the writer thread.
 11. Cancel the signal wait, print final metrics including enqueued/written/unwritten counts, and return zero only if capture/replay and the complete writer drain succeeded. Any latched writer error forces a nonzero result.
 
+A successful orderly shutdown guarantees that every accepted row was passed completely to the kernel and every descriptor was checked and closed. It does not guarantee persistence across an operating-system crash or power loss because the baseline deliberately does not call `fsync` or `fdatasync`.
+
 No callback may access destroyed application, session, symbol, queue, or file state.
 
 ## 17. Replay determinism
