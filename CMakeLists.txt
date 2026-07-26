@@ -39,9 +39,11 @@ endfunction()
 
 add_library(hft_core STATIC
     src/csv_formatter.cpp
+    src/event_processor.cpp
     src/fixed_point.cpp
     src/spot_book.cpp
     src/spot_payload_parser.cpp
+    src/symbol_identity.cpp
 )
 
 target_compile_features(hft_core PUBLIC cxx_std_17)

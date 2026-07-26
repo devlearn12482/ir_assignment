@@ -1,9 +1,11 @@
 add_executable(unit_tests
     csv_formatter_test.cpp
+    event_processor_test.cpp
     fixed_point_test.cpp
     simdjson_contract_test.cpp
     spot_book_test.cpp
     spot_payload_parser_test.cpp
+    symbol_identity_test.cpp
     unit_tests.cpp
     usdm_book_test.cpp
     usdm_payload_parser_test.cpp
