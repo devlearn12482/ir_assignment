@@ -89,11 +89,12 @@ public:
         return FileCloseResult{true, 0};
     }
 
-    [[nodiscard]] bool remove(
+    [[nodiscard]] FileRemoveResult remove(
         const std::string& path) noexcept override {
         ++remove_calls;
         removed_path = path;
-        return remove_succeeds;
+        return FileRemoveResult{
+            remove_succeeds, remove_succeeds ? 0 : EIO};
     }
 
     void reset_write_observation() {
@@ -329,6 +330,26 @@ void test_open_and_close_failures(Context& context) {
                 operations->remove_calls == 1U &&
                 operations->removed_path == "header-failure.csv",
             "header failure closes and removes the partial file");
+    }
+
+    {
+        auto operations = std::make_shared<FakeFileOperations>();
+        operations->actions = {WriteAction{-1, EIO}};
+        operations->remove_succeeds = false;
+        FileSinkError error;
+        auto sink = BufferedCsvFileSink::open_exclusive(
+            "header-cleanup-failure.csv",
+            CsvFileKind::market_data,
+            operations,
+            error);
+        context.expect(
+            !sink &&
+                error.code == FileSinkErrorCode::write_failed &&
+                error.native_error == EIO &&
+                error.cleanup_operation ==
+                    FileSinkCleanupOperation::remove &&
+                error.cleanup_native_error == EIO,
+            "failed-open cleanup is observable without hiding the header error");
     }
 
     {

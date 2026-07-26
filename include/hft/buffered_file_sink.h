@@ -28,9 +28,18 @@ enum class FileSinkErrorCode : std::uint8_t {
     close_failed,
 };
 
+enum class FileSinkCleanupOperation : std::uint8_t {
+    none,
+    close,
+    remove,
+};
+
 struct FileSinkError {
     FileSinkErrorCode code{FileSinkErrorCode::none};
     int native_error{0};
+    FileSinkCleanupOperation cleanup_operation{
+        FileSinkCleanupOperation::none};
+    int cleanup_native_error{0};
 
     [[nodiscard]] explicit operator bool() const noexcept {
         return code != FileSinkErrorCode::none;
@@ -52,6 +61,11 @@ struct FileCloseResult {
     int native_error{0};
 };
 
+struct FileRemoveResult {
+    bool success{false};
+    int native_error{0};
+};
+
 class FileOperations {
 public:
     virtual ~FileOperations() = default;
@@ -64,9 +78,11 @@ public:
         std::size_t size) noexcept = 0;
     [[nodiscard]] virtual FileCloseResult close(
         int descriptor) noexcept = 0;
-    [[nodiscard]] virtual bool remove(
+    [[nodiscard]] virtual FileRemoveResult remove(
         const std::string& path) noexcept = 0;
 };
+
+[[nodiscard]] std::shared_ptr<FileOperations> posix_file_operations();
 
 struct BufferedFileSinkMetrics {
     std::uint64_t native_write_calls{0};
@@ -126,7 +142,7 @@ private:
     [[nodiscard]] FileSinkError latch_error(
         FileSinkErrorCode code,
         int native_error) noexcept;
-    void close_after_failed_open() noexcept;
+    [[nodiscard]] FileSinkError close_after_failed_open() noexcept;
 
     std::string path_;
     int descriptor_{-1};
@@ -157,6 +173,19 @@ private:
             return "write_failed";
         case FileSinkErrorCode::close_failed:
             return "close_failed";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] constexpr std::string_view to_string(
+    const FileSinkCleanupOperation operation) noexcept {
+    switch (operation) {
+        case FileSinkCleanupOperation::none:
+            return "none";
+        case FileSinkCleanupOperation::close:
+            return "close";
+        case FileSinkCleanupOperation::remove:
+            return "remove";
     }
     return "unknown";
 }

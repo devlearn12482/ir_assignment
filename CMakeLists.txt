@@ -40,6 +40,7 @@ endfunction()
 add_library(hft_core STATIC
     src/buffered_file_sink.cpp
     src/csv_formatter.cpp
+    src/csv_output_set.cpp
     src/event_processor.cpp
     src/fixed_point.cpp
     src/spot_book.cpp

@@ -1,6 +1,7 @@
 add_executable(unit_tests
     buffered_file_sink_test.cpp
     csv_formatter_test.cpp
+    csv_output_set_test.cpp
     event_processor_test.cpp
     event_processor_robustness_test.cpp
     fixed_point_test.cpp
