@@ -90,6 +90,13 @@ struct OutputSetWriteError {
     }
 };
 
+struct CsvOutputSetMetrics {
+    std::uint64_t audit_rows_written{0};
+    std::uint64_t order_book_rows_written{0};
+    std::uint64_t audit_rows_buffered{0};
+    std::uint64_t order_book_rows_buffered{0};
+};
+
 class CsvOutputSet {
 public:
     // Single-owner file boundary. Resolve a symbol once to its stable target
@@ -152,6 +159,7 @@ public:
     [[nodiscard]] bool failed() const noexcept;
     [[nodiscard]] bool closed() const noexcept;
     [[nodiscard]] const OutputSetWriteError& first_error() const noexcept;
+    [[nodiscard]] CsvOutputSetMetrics metrics() const noexcept;
 
 private:
     struct TargetFiles {

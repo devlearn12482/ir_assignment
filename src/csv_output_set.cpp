@@ -439,6 +439,26 @@ const OutputSetWriteError& CsvOutputSet::first_error() const noexcept {
     return first_error_;
 }
 
+CsvOutputSetMetrics CsvOutputSet::metrics() const noexcept {
+    CsvOutputSetMetrics result;
+    for (std::size_t index = 0; index < target_count_; ++index) {
+        const TargetFiles& target = targets_[index];
+        if (target.audit) {
+            result.audit_rows_written +=
+                target.audit->metrics().rows_written;
+            result.audit_rows_buffered +=
+                target.audit->buffered_rows();
+        }
+        if (target.order_book) {
+            result.order_book_rows_written +=
+                target.order_book->metrics().rows_written;
+            result.order_book_rows_buffered +=
+                target.order_book->buffered_rows();
+        }
+    }
+    return result;
+}
+
 bool CsvOutputSet::valid_utc_date(
     const std::string_view value) noexcept {
     if (value.size() != 10U || value[4] != '-' || value[7] != '-') {

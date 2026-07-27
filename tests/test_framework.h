@@ -26,6 +26,7 @@ void run_buffered_file_sink_tests(Context& context);
 void run_command_line_tests(Context& context);
 void run_csv_formatter_tests(Context& context);
 void run_csv_output_set_tests(Context& context);
+void run_csv_writer_tests(Context& context);
 void run_event_processor_tests(Context& context);
 void run_event_processor_robustness_tests(Context& context);
 void run_fixed_point_tests(Context& context);

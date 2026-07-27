@@ -169,6 +169,16 @@ void EventRowBatch::clear() noexcept {
     has_order_book_row = false;
 }
 
+bool EventRowBatch::release_excess_capacity() noexcept {
+    has_audit_row = false;
+    has_order_book_row = false;
+    const bool audit_released =
+        audit_row.release_excess_capacity();
+    const bool book_released =
+        order_book_row.release_excess_capacity();
+    return audit_released && book_released;
+}
+
 std::optional<SymbolState> SymbolState::create(
     const PayloadVenue venue,
     const std::string_view normalized_symbol) noexcept {

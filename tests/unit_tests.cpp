@@ -8,6 +8,7 @@ int main() {
     hft::test::run_command_line_tests(context);
     hft::test::run_csv_formatter_tests(context);
     hft::test::run_csv_output_set_tests(context);
+    hft::test::run_csv_writer_tests(context);
     hft::test::run_symbol_identity_tests(context);
     hft::test::run_simdjson_contract_tests(context);
     hft::test::run_fixed_point_tests(context);
