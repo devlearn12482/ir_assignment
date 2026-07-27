@@ -716,13 +716,13 @@ The queue is a 4096-slot SPSC ring constructed before capture/replay begins. A `
 Each slot contains:
 
 - Target instrument/file ID.
-- An SBO-style audit-row buffer with 4 KiB inline storage and an order-book-row buffer with 2 KiB inline storage.
+- A reusable audit-row buffer pre-reserved to 4 KiB and an order-book-row buffer pre-reserved to 1 KiB during queue construction.
 - Presence flags for the optional audit row (live only) and optional order-book row.
-- Connection and application sequence metadata for diagnostics.
+- Logical row bytes and exceptional overflow-capacity bytes for bounded occupancy accounting; connection and application sequence metadata remain encoded in the complete row.
 
-The producer acquires the next free slot, clears its logical sizes, and formats directly into the inline buffers. Publishing the producer index transfers exclusive slot ownership to the writer. The writer writes both rows, resets the slot, and publishes the consumer index; no row buffer is copied or moved between heap-owning objects.
+The producer acquires the next free slot, clears its logical sizes, and formats directly into the slot-owned buffers. Publishing the producer index transfers exclusive slot ownership to the writer. The writer writes both rows, resets the slot, and publishes the consumer index; no row buffer is copied or moved between heap-owning objects. This implementation deliberately pays the common buffer allocations once during queue construction rather than embedding roughly 20 MiB of character arrays in the ring object.
 
-An exceptional row larger than its inline capacity may allocate overflow storage up to the 3 MiB record limit. The writer releases that overflow before returning the slot to the producer, preventing one large event from multiplying retained capacity across 4096 slots. Large-row allocation count and bytes are explicit metrics; normal rows within inline capacity require no row-buffer allocation.
+An exceptional row larger than its reserved capacity may allocate overflow storage up to the 3 MiB record limit. The writer replaces that oversized storage with a freshly reserved common-capacity buffer before returning the slot to the producer, preventing one large event from multiplying retained capacity across 4096 slots. Overflow-batch count, excess-capacity bytes, and release failures are explicit metrics; normal rows within reserved capacity require no row-buffer allocation.
 
 The queue is bounded by both 4096 occupied slots and 64 MiB of logical queued row bytes. Reaching 75% of either limit pauses production, and draining below 50% resumes it. Slot count, logical bytes, and active overflow-storage bytes are reported separately so SBO use cannot hide exceptional memory growth.
 

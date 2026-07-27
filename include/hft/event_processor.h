@@ -53,6 +53,7 @@ public:
     EventRowBatch();
 
     void clear() noexcept;
+    [[nodiscard]] bool release_excess_capacity() noexcept;
 
     CsvRecordBuffer audit_row;
     CsvRecordBuffer order_book_row;

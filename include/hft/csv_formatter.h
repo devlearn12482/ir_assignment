@@ -79,10 +79,13 @@ public:
     [[nodiscard]] std::size_t size() const noexcept;
     [[nodiscard]] bool empty() const noexcept;
     [[nodiscard]] std::size_t capacity() const noexcept;
+    [[nodiscard]] std::size_t initial_capacity() const noexcept;
     void clear() noexcept;
+    [[nodiscard]] bool release_excess_capacity() noexcept;
 
 private:
     std::string storage_;
+    std::size_t initial_capacity_{kDefaultCsvRecordCapacity};
 
     friend CsvFormatError format_market_data_csv_row(
         const MarketDataCsvRow& row,

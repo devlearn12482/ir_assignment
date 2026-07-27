@@ -46,6 +46,7 @@ add_library(hft_core STATIC
     src/command_line.cpp
     src/csv_formatter.cpp
     src/csv_output_set.cpp
+    src/csv_writer.cpp
     src/event_processor.cpp
     src/fixed_point.cpp
     src/live_envelope.cpp

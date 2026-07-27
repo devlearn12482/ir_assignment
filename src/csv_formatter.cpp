@@ -211,9 +211,10 @@ template <typename Integer>
 }  // namespace
 
 CsvRecordBuffer::CsvRecordBuffer(
-    const std::size_t initial_capacity) {
-    storage_.reserve(
-        std::min(initial_capacity, kMaxCsvRecordBytes));
+    const std::size_t initial_capacity)
+    : initial_capacity_{
+          std::min(initial_capacity, kMaxCsvRecordBytes)} {
+    storage_.reserve(initial_capacity_);
 }
 
 std::string_view CsvRecordBuffer::view() const noexcept {
@@ -232,8 +233,27 @@ std::size_t CsvRecordBuffer::capacity() const noexcept {
     return storage_.capacity();
 }
 
+std::size_t CsvRecordBuffer::initial_capacity() const noexcept {
+    return initial_capacity_;
+}
+
 void CsvRecordBuffer::clear() noexcept {
     storage_.clear();
+}
+
+bool CsvRecordBuffer::release_excess_capacity() noexcept {
+    storage_.clear();
+    if (storage_.capacity() <= initial_capacity_) {
+        return true;
+    }
+    try {
+        std::string replacement;
+        replacement.reserve(initial_capacity_);
+        storage_.swap(replacement);
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 CsvFormatError format_market_data_csv_row(
