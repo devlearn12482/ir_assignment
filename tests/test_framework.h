@@ -30,6 +30,7 @@ void run_event_processor_tests(Context& context);
 void run_event_processor_robustness_tests(Context& context);
 void run_fixed_point_tests(Context& context);
 void run_live_envelope_tests(Context& context);
+void run_live_event_pipeline_tests(Context& context);
 void run_live_subscription_tests(Context& context);
 void run_market_data_replay_tests(Context& context);
 void run_simdjson_contract_tests(Context& context);

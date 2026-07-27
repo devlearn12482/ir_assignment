@@ -183,6 +183,12 @@ void test_type_syntax_and_reuse_errors(Context& context) {
         R"json({"stream":7,"data":{}})json"};
     const PaddedMessage data_array{
         R"json({"stream":"btcusdt@trade","data":[]})json"};
+    const PaddedMessage routed_missing_data{
+        R"json({"stream":"btcusdt@depth@100ms"})json"};
+    const PaddedMessage routed_data_first{
+        R"json({"data":[],"stream":"btcusdt@depth@100ms"})json"};
+    const PaddedMessage ambiguous_stream{
+        R"json({"stream":"btcusdt@depth@100ms","stream":"btcusdt@depth@100ms","data":{}})json"};
     const PaddedMessage malformed{
         R"json({"stream":"btcusdt@trade","data":{"x":]}})json"};
     const LiveEnvelopeResult malformed_result =
@@ -203,6 +209,31 @@ void test_type_syntax_and_reuse_errors(Context& context) {
         parser.parse(data_array.view(), *subscription).error ==
             LiveEnvelopeErrorCode::data_not_object,
         "non-object data is rejected");
+    const LiveEnvelopeResult missing_data =
+        parser.parse(routed_missing_data.view(), *subscription);
+    const LiveEnvelopeResult data_first =
+        parser.parse(routed_data_first.view(), *subscription);
+    const LiveEnvelopeResult duplicate =
+        parser.parse(ambiguous_stream.view(), *subscription);
+    context.expect(
+        missing_data.error ==
+                LiveEnvelopeErrorCode::missing_data &&
+            missing_data.route != nullptr &&
+            missing_data.route->stream_kind ==
+                SpotStreamKind::depth_diff,
+        "missing data preserves a safely identified route");
+    context.expect(
+        data_first.error ==
+                LiveEnvelopeErrorCode::data_not_object &&
+            data_first.route != nullptr &&
+            data_first.route->stream_kind ==
+                SpotStreamKind::depth_diff,
+        "data-before-stream error preserves order-independent routing");
+    context.expect(
+        duplicate.error ==
+                LiveEnvelopeErrorCode::duplicate_stream &&
+            duplicate.route == nullptr,
+        "duplicate stream remains intentionally ambiguous");
     context.expect(
         malformed_result.success(),
         "lazy envelope extraction locates malformed inner object");

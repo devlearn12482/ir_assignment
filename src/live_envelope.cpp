@@ -27,8 +27,10 @@ static_assert(kEnvelopeParserDepth > kMaxJsonNestingDepth);
 
 [[nodiscard]] LiveEnvelopeResult fail(
     const LiveEnvelopeErrorCode error,
-    const LiveEnvelopeField field) noexcept {
+    const LiveEnvelopeField field,
+    const LiveRoute* const route = nullptr) noexcept {
     LiveEnvelopeResult result;
+    result.route = route;
     result.error = error;
     result.field = field;
     return result;
@@ -98,30 +100,63 @@ struct LiveEnvelopeParser::Impl {
         }
 
         bool stream_seen = false;
+        bool stream_valid = false;
+        bool stream_ambiguous = false;
         bool data_seen = false;
         std::string_view stream_name;
         std::string_view raw_data;
+        LiveEnvelopeErrorCode semantic_error{
+            LiveEnvelopeErrorCode::none};
+        LiveEnvelopeField semantic_field{LiveEnvelopeField::none};
+        const auto record_semantic_error =
+            [&](const LiveEnvelopeErrorCode code,
+                const LiveEnvelopeField field) noexcept {
+                if (semantic_error ==
+                    LiveEnvelopeErrorCode::none) {
+                    semantic_error = code;
+                    semantic_field = field;
+                }
+            };
+        const auto known_route = [&]() noexcept
+            -> const LiveRoute* {
+            if (!stream_valid || stream_ambiguous) {
+                return nullptr;
+            }
+            return subscription.find_route(stream_name).route;
+        };
+
         for (auto field_result : object) {
             simdjson::ondemand::field field;
             error = std::move(field_result).get(field);
             if (error != simdjson::SUCCESS) {
                 return fail(
                     classify_json_error(error),
-                    LiveEnvelopeField::root);
+                    LiveEnvelopeField::root,
+                    known_route());
             }
             std::string_view key;
             error = field.unescaped_key(false).get(key);
             if (error != simdjson::SUCCESS) {
                 return fail(
                     classify_json_error(error),
-                    LiveEnvelopeField::root);
+                    LiveEnvelopeField::root,
+                    known_route());
             }
             simdjson::ondemand::value& value = field.value();
             if (key == "stream") {
                 if (stream_seen) {
-                    return fail(
+                    stream_ambiguous = true;
+                    record_semantic_error(
                         LiveEnvelopeErrorCode::duplicate_stream,
                         LiveEnvelopeField::stream);
+                    error = detail::validate_json_value(
+                        value, kEnvelopeChildContainerDepth);
+                    if (error != simdjson::SUCCESS) {
+                        return fail(
+                            classify_json_error(error),
+                            LiveEnvelopeField::stream);
+                    }
+                    continue;
                 }
                 stream_seen = true;
                 simdjson::ondemand::json_type type;
@@ -129,17 +164,22 @@ struct LiveEnvelopeParser::Impl {
                 if (error != simdjson::SUCCESS) {
                     return fail(
                         classify_json_error(error),
-                        LiveEnvelopeField::stream);
+                        LiveEnvelopeField::stream,
+                        known_route());
                 }
                 if (type !=
                     simdjson::ondemand::json_type::string) {
                     error = detail::validate_json_value(
                         value, kEnvelopeChildContainerDepth);
-                    return fail(
-                        error == simdjson::SUCCESS
-                            ? LiveEnvelopeErrorCode::stream_wrong_type
-                            : classify_json_error(error),
+                    if (error != simdjson::SUCCESS) {
+                        return fail(
+                            classify_json_error(error),
+                            LiveEnvelopeField::stream);
+                    }
+                    record_semantic_error(
+                        LiveEnvelopeErrorCode::stream_wrong_type,
                         LiveEnvelopeField::stream);
+                    continue;
                 }
                 error = value.get_string().get(stream_name);
                 if (error != simdjson::SUCCESS) {
@@ -147,11 +187,21 @@ struct LiveEnvelopeParser::Impl {
                         classify_json_error(error),
                         LiveEnvelopeField::stream);
                 }
+                stream_valid = true;
             } else if (key == "data") {
                 if (data_seen) {
-                    return fail(
+                    record_semantic_error(
                         LiveEnvelopeErrorCode::duplicate_data,
                         LiveEnvelopeField::data);
+                    error = detail::validate_json_value(
+                        value, kEnvelopeChildContainerDepth);
+                    if (error != simdjson::SUCCESS) {
+                        return fail(
+                            classify_json_error(error),
+                            LiveEnvelopeField::data,
+                            known_route());
+                    }
+                    continue;
                 }
                 data_seen = true;
                 simdjson::ondemand::json_type type;
@@ -159,23 +209,30 @@ struct LiveEnvelopeParser::Impl {
                 if (error != simdjson::SUCCESS) {
                     return fail(
                         classify_json_error(error),
-                        LiveEnvelopeField::data);
+                        LiveEnvelopeField::data,
+                        known_route());
                 }
                 if (type !=
                     simdjson::ondemand::json_type::object) {
                     error = detail::validate_json_value(
                         value, kEnvelopeChildContainerDepth);
-                    return fail(
-                        error == simdjson::SUCCESS
-                            ? LiveEnvelopeErrorCode::data_not_object
-                            : classify_json_error(error),
+                    if (error != simdjson::SUCCESS) {
+                        return fail(
+                            classify_json_error(error),
+                            LiveEnvelopeField::data,
+                            known_route());
+                    }
+                    record_semantic_error(
+                        LiveEnvelopeErrorCode::data_not_object,
                         LiveEnvelopeField::data);
+                    continue;
                 }
                 error = value.raw_json().get(raw_data);
                 if (error != simdjson::SUCCESS) {
                     return fail(
                         classify_json_error(error),
-                        LiveEnvelopeField::data);
+                        LiveEnvelopeField::data,
+                        known_route());
                 }
             } else {
                 error = detail::validate_json_value(
@@ -183,7 +240,8 @@ struct LiveEnvelopeParser::Impl {
                 if (error != simdjson::SUCCESS) {
                     return fail(
                         classify_json_error(error),
-                        LiveEnvelopeField::unknown);
+                        LiveEnvelopeField::unknown,
+                        known_route());
                 }
             }
         }
@@ -192,14 +250,25 @@ struct LiveEnvelopeParser::Impl {
                 LiveEnvelopeErrorCode::missing_stream,
                 LiveEnvelopeField::stream);
         }
-        if (!data_seen) {
-            return fail(
-                LiveEnvelopeErrorCode::missing_data,
-                LiveEnvelopeField::data);
-        }
 
         const RouteLookupResult route =
             subscription.find_route(stream_name);
+        const LiveRoute* const safe_route =
+            stream_valid && !stream_ambiguous
+                ? route.route
+                : nullptr;
+        if (semantic_error != LiveEnvelopeErrorCode::none) {
+            return fail(
+                semantic_error,
+                semantic_field,
+                safe_route);
+        }
+        if (!data_seen) {
+            return fail(
+                LiveEnvelopeErrorCode::missing_data,
+                LiveEnvelopeField::data,
+                safe_route);
+        }
         if (!route.success()) {
             return fail(
                 route.error ==
@@ -218,7 +287,8 @@ struct LiveEnvelopeParser::Impl {
         if (error != simdjson::SUCCESS) {
             return fail(
                 LiveEnvelopeErrorCode::payload_minify_failed,
-                LiveEnvelopeField::data);
+                LiveEnvelopeField::data,
+                route.route);
         }
         std::memset(
             payload.get() + payload_size,
