@@ -7,11 +7,13 @@
 #include <boost/asio/post.hpp>
 #include <boost/asio/ssl/context.hpp>
 #include <boost/asio/ssl/stream.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/core/flat_buffer.hpp>
 #include <boost/beast/ssl.hpp>
 #include <boost/beast/websocket.hpp>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -45,6 +47,8 @@ enum class Scenario : std::uint8_t {
     remote_close,
     active_read_stop,
     text_callback_failure,
+    pause_resume,
+    paused_stop,
 };
 
 struct ServerOutcome {
@@ -68,6 +72,7 @@ struct ClientOutcome {
     std::uint64_t connection_sequence{0};
     hft::CsvTimestamp timestamp{};
     bool exact_limit_payload_valid{false};
+    std::int64_t pause_delay_milliseconds{0};
     hft::WebSocketSessionResult terminal{};
 };
 
@@ -177,7 +182,8 @@ void run_server(
                 wait_for_peer_close(stream, outcome);
                 return;
             }
-            case Scenario::sequential_text_messages: {
+            case Scenario::sequential_text_messages:
+            case Scenario::pause_resume: {
                 stream.text(true);
                 stream.write(
                     asio::buffer("one", 3U), error);
@@ -268,6 +274,18 @@ void run_server(
                         error.message();
                 }
                 return;
+            case Scenario::paused_stop:
+                stream.text(true);
+                stream.write(
+                    asio::buffer("pause", 5U), error);
+                if (error) {
+                    outcome.error =
+                        "paused-stop write: " +
+                        error.message();
+                    return;
+                }
+                wait_for_peer_close(stream, outcome);
+                return;
         }
     } catch (const std::exception& error) {
         outcome.error = error.what();
@@ -283,6 +301,8 @@ ClientOutcome run_client(
     asio::io_context io_context;
     ClientOutcome outcome;
     std::shared_ptr<hft::VerifiedWebSocketSession> session;
+    asio::steady_timer resume_timer{io_context};
+    std::chrono::steady_clock::time_point pause_started{};
     hft::WebSocketSessionCallbacks callbacks;
     callbacks.on_open = [&] {
         outcome.opened = true;
@@ -311,7 +331,8 @@ ClientOutcome run_client(
                     message.payload.size());
             } else if (
                 scenario ==
-                Scenario::sequential_text_messages) {
+                    Scenario::sequential_text_messages ||
+                scenario == Scenario::pause_resume) {
                 if (!outcome.text_payload.empty()) {
                     outcome.text_payload.push_back('/');
                 }
@@ -330,6 +351,40 @@ ClientOutcome run_client(
                 Scenario::text_callback_failure) {
                 throw std::runtime_error{
                     "injected text callback failure"};
+            }
+            if (scenario == Scenario::pause_resume &&
+                outcome.text_messages == 1U) {
+                pause_started =
+                    std::chrono::steady_clock::now();
+                session->pause_reads();
+                session->pause_reads();
+                resume_timer.expires_after(
+                    std::chrono::milliseconds{100});
+                resume_timer.async_wait(
+                    [&](const boost::system::error_code& error) {
+                        if (!error) {
+                            session->resume_reads();
+                            session->resume_reads();
+                        }
+                    });
+                return;
+            }
+            if (scenario == Scenario::pause_resume &&
+                outcome.text_messages == 2U) {
+                outcome.pause_delay_milliseconds =
+                    std::chrono::duration_cast<
+                        std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() -
+                        pause_started)
+                        .count();
+            }
+            if (scenario == Scenario::paused_stop) {
+                session->pause_reads();
+                session->pause_reads();
+                asio::post(
+                    io_context,
+                    [&] { session->stop(); });
+                return;
             }
             if (scenario !=
                     Scenario::sequential_text_messages ||
@@ -561,6 +616,26 @@ bool run_case(
                 fail("text callback exception escaped the session");
             }
             break;
+        case Scenario::pause_resume:
+            if (!client_outcome.terminal.success() ||
+                client_outcome.text_messages != 2U ||
+                client_outcome.text_payload != "one/two" ||
+                client_outcome.pause_delay_milliseconds < 75 ||
+                client_outcome.terminal.
+                        last_connection_sequence != 2U) {
+                fail(
+                    "paused read resumed early, duplicated, or lost data");
+            }
+            break;
+        case Scenario::paused_stop:
+            if (!client_outcome.terminal.success() ||
+                client_outcome.text_messages != 1U ||
+                client_outcome.connection_sequence != 1U ||
+                client_outcome.terminal.
+                        last_connection_sequence != 1U) {
+                fail("stop while paused did not close cleanly");
+            }
+            break;
     }
     return success;
 }
@@ -604,6 +679,8 @@ int main(const int argc, const char* const* const argv) {
     run(
         Scenario::text_callback_failure,
         "text-callback-failure");
+    run(Scenario::pause_resume, "pause-resume");
+    run(Scenario::paused_stop, "paused-stop");
     if (success) {
         std::cout
             << "PASS: bounded WebSocket read loop integration\n";

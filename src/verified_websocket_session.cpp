@@ -97,6 +97,7 @@ struct VerifiedWebSocketSession::Impl {
     bool in_control_callback{false};
     bool stop_requested_during_control{false};
     bool control_callback_failed{false};
+    bool reads_paused{false};
     std::uint64_t connection_epoch{0};
     std::uint64_t connection_sequence{0};
     std::atomic<bool> terminal_flag{false};
@@ -466,7 +467,7 @@ struct VerifiedWebSocketSession::Impl {
             return;
         }
         clear_read_buffer();
-        if (state == State::open) {
+        if (state == State::open && !reads_paused) {
             issue_read(std::move(owner));
         }
     }
@@ -630,10 +631,28 @@ struct VerifiedWebSocketSession::Impl {
                             {}});
                     }
                 }
-                if (self.state == State::open) {
+                if (self.state == State::open &&
+                    !self.reads_paused) {
                     self.issue_read(std::move(owner));
                 }
             });
+    }
+
+    void pause_reads() noexcept {
+        if (state != State::terminal) {
+            reads_paused = true;
+        }
+    }
+
+    void resume_reads(
+        std::shared_ptr<VerifiedWebSocketSession> owner) {
+        if (state == State::terminal) {
+            return;
+        }
+        reads_paused = false;
+        if (state == State::open && !read_in_progress) {
+            issue_read(std::move(owner));
+        }
     }
 
     void stop(std::shared_ptr<VerifiedWebSocketSession> owner) {
@@ -783,6 +802,22 @@ void VerifiedWebSocketSession::stop() {
     asio::dispatch(
         impl_->strand,
         [owner] { owner->impl_->stop(owner); });
+}
+
+void VerifiedWebSocketSession::pause_reads() {
+    const std::shared_ptr<VerifiedWebSocketSession> owner =
+        shared_from_this();
+    asio::dispatch(
+        impl_->strand,
+        [owner] { owner->impl_->pause_reads(); });
+}
+
+void VerifiedWebSocketSession::resume_reads() {
+    const std::shared_ptr<VerifiedWebSocketSession> owner =
+        shared_from_this();
+    asio::dispatch(
+        impl_->strand,
+        [owner] { owner->impl_->resume_reads(owner); });
 }
 
 bool VerifiedWebSocketSession::terminal() const noexcept {
