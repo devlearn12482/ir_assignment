@@ -151,7 +151,8 @@ This table records load-bearing resolutions, including reversals of earlier draf
 ```mermaid
 flowchart LR
     Binance["Binance combined WebSocket"] --> Session["WebSocketSession"]
-    Session --> Processor["EventProcessor"]
+    Session --> LivePipeline["LiveEventPipeline"]
+    LivePipeline --> Processor["EventProcessor"]
     Replay["ReplayReader"] --> Processor
     Processor --> Books["Per-symbol SymbolState"]
     Processor --> Rows["CSV row construction"]
@@ -165,7 +166,7 @@ flowchart LR
     Writer --> Metrics
 ```
 
-Live capture and replay share `EventProcessor`, `SymbolState`, fixed-point conversion, CSV row construction, and book semantics. They differ only in how an `EventContext` and payload enter the processor.
+`LiveEventPipeline` is the synchronous bridge from one complete text message to a writer-ready row batch. It owns the combined-envelope scratch buffer, envelope parser, shared `EventProcessor`, and per-symbol `SymbolState` instances. It does not own files or perform blocking writes. Live capture and replay share `EventProcessor`, `SymbolState`, fixed-point conversion, CSV row construction, and book semantics. They differ only in how an `EventContext` and payload enter the processor.
 
 ## 5. Component responsibilities
 
@@ -197,7 +198,7 @@ Live capture and replay share `EventProcessor`, `SymbolState`, fixed-point conve
 - Capture receive wall-clock time immediately after a complete read succeeds.
 - Assign `conn_seq` before envelope or payload parsing.
 - Require `got_text()` for every successfully read market-data message. A binary message is a complete pre-audit protocol rejection: it consumes `conn_seq`, increments the complete-message, binary-message, pre-audit-rejection, and message-policy-termination counters plus the breaker state, invalidates the connection's books, and reconnects without producing an audit row unless this is the fatal third breaker increment.
-- Forward the complete message and connection metadata to `EventProcessor`.
+- Forward the complete text message and connection metadata to `LiveEventPipeline`.
 - Let Beast automatically handle ping and close frames during the outstanding read, including returning the ping payload in its pong. The control callback is passive: it observes and counts ping, pong, and close frames and never sends a manual pong or close.
 - Apply bounded reconnect backoff unless the application is stopping or the error is non-recoverable.
 
@@ -213,11 +214,12 @@ Live capture and replay share `EventProcessor`, `SymbolState`, fixed-point conve
 - On an epoch increase, drive the same symbol invalidation and venue-specific chain reset used by live reconnect before applying that row; no sequence continuity is inferred across epochs.
 - Refuse to overwrite an input or expected-output file accidentally.
 
-### 5.4 EventProcessor
+### 5.4 LiveEventPipeline and EventProcessor
 
-- Parse the combined-stream envelope once with simdjson On-Demand in live mode and extract the exact source slice for its inner `data` object.
+- `LiveEventPipeline` copies the complete message into its preallocated padded scratch buffer, validates global epoch/sequence metadata, parses the combined-stream envelope once with simdjson On-Demand, and extracts the exact source slice for its inner `data` object.
 - Resolve the envelope's `stream` view through the precomputed allocation-free route table and obtain its `SymbolState` and stream kind.
 - Validate that the stream belongs to the configured subscription set.
+- Preserve a route on an envelope rejection only when exactly one valid configured stream name was identified. A safely routed differential rejection invalidates only that symbol's book; an absent, unknown, malformed, or duplicate stream cannot select a book.
 - When the payload includes a symbol, verify it matches the envelope symbol.
 - Once the envelope is valid, the stream is recognized, and `data` is a syntactically valid JSON object, construct its live audit row before depth-schema validation. A depth-schema failure is therefore recorded and can be reproduced by replay.
 - Dispatch parsing by venue and stream kind; do not assume Spot and USD-M share schemas.
@@ -375,15 +377,15 @@ Replay uses the same processing/writer boundary. Its input loop replaces the Web
 2. It captures wall-clock nanoseconds and splits them into seconds and nanosecond remainder.
 3. It increments and assigns `conn_seq` for the complete message.
 4. If `got_text()` is false, the session counts a binary pre-audit rejection and message-policy termination, invalidates all books on the connection, and enters the reconnect path unless this is the fatal third breaker increment; no payload bytes reach `EventProcessor`.
-5. `EventProcessor` parses the combined envelope with simdjson On-Demand and obtains the exact source slice of the inner `data` object.
-6. It derives venue-configured symbol and stream kind from the envelope stream name.
-7. It lexically minifies the exact source slice into the padded shared payload scratch buffer.
-8. It traverses that minified buffer once with the shared payload On-Demand parser, confirms that it is a syntactically valid object, and fills reusable event scratch while accumulating any depth-schema error.
+5. `LiveEventPipeline` copies the complete message into its preallocated padded scratch, validates the combined envelope with simdjson On-Demand, and obtains the exact source slice of the inner `data` object.
+6. It derives the venue-configured symbol and stream kind from the envelope stream name and selects the corresponding per-symbol state.
+7. `LiveEnvelopeParser` lexically minifies the exact source slice into its padded reusable payload scratch buffer.
+8. `EventProcessor` traverses that minified buffer once with the shared payload On-Demand parser, confirms that it is a syntactically valid object, and fills reusable event scratch while accumulating any depth-schema error.
 9. It RFC-escapes the same minified bytes into the audit row before acting on the accumulated schema result.
 10. If depth schema validation fails, it enqueues an audit-only batch, counts the error, and applies the event-class failure policy: invalidate on an unreadable differential update and preserve current validity for a malformed independent partial refresh. Trade diagnostics never affect book validity.
 11. Otherwise, it validates and applies the event to the symbol state when appropriate.
 12. For every accepted diff or refresh, it increments `seqNo` and constructs the 26-column snapshot row using the same receive timestamp, even when an accepted diff does not alter a currently visible top-five level.
-13. It publishes the completed audit row and optional snapshot row as one `WriteBatch` ring slot.
+13. `LiveEventPipeline` returns the completed audit row and optional snapshot row in one caller-owned batch; the live session controller publishes that batch as one `WriteBatch` ring slot.
 14. If the writer queue remains below the pause threshold, the session issues the next `async_read`.
 
 Processing order is the order of completed WebSocket messages on the single connection. Each per-symbol audit file contains that symbol's subsequence of the connection order; gaps in `conn_seq` are expected when intervening messages belong to another symbol or a malformed/binary message consumed a sequence value.
@@ -399,7 +401,7 @@ Expected combined envelope:
 Routing rules:
 
 - Precompute all expected lowercase stream names and their `{SymbolState*, StreamKind}` routes during configuration.
-- Keep the route entries sorted by exact stream name and binary-search them with the envelope `std::string_view`; at the 96-stream baseline cap this takes at most seven string comparisons and no allocation.
+- Resolve the envelope `std::string_view` through a fixed 256-slot open-addressed table built at configuration time. At the 96-stream baseline cap the load factor is at most 37.5%; lookup performs no allocation and compares only exact stream bytes while probing.
 - Require the inbound stream name to equal its documented lowercase configured name; do not create a normalized temporary string.
 - While constructing the route table, map only exact known suffixes, preferring the longest exact suffix:
   - `@depth@100ms` -> `depth_diff`

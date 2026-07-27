@@ -85,6 +85,9 @@ enum class WebSocketControlKind : std::uint8_t {
 
 struct WebSocketTextMessage {
     CsvTimestamp receive_timestamp{};
+    // Epoch zero is the first successful connection. Sequence is one-based
+    // within an epoch and counts every complete message, including a binary
+    // message rejected before this text callback.
     std::uint64_t connection_epoch{0};
     std::uint64_t connection_sequence{0};
     // The view is valid only for the synchronous callback invocation.
