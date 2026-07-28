@@ -120,6 +120,7 @@ std::unique_ptr<CsvOutputSet> CsvOutputSet::open_live(
     try {
         output.reset(new CsvOutputSet{
             CsvOutputMode::live_capture, operations});
+        output->venue_ = venue;
         output->output_directory_ = std::move(output_directory);
         output->target_count_ = symbol_count;
         for (std::size_t index = 0; index < symbol_count; ++index) {
@@ -268,6 +269,11 @@ std::size_t CsvOutputSet::target_count() const noexcept {
 
 CsvOutputMode CsvOutputSet::mode() const noexcept {
     return mode_;
+}
+
+std::optional<PayloadVenue> CsvOutputSet::venue()
+    const noexcept {
+    return venue_;
 }
 
 std::optional<std::size_t> CsvOutputSet::find_target(

@@ -196,6 +196,9 @@ void test_live_initialization_routing_and_exact_files(Context& context) {
     context.expect(
         output != nullptr && !open_error &&
             output->mode() == CsvOutputMode::live_capture &&
+            output->venue() ==
+                std::optional<PayloadVenue>{
+                    PayloadVenue::spot} &&
             output->target_count() == 2U,
         "live output set creates every target before returning");
     if (!output) {
@@ -279,6 +282,7 @@ void test_replay_book_only_contract(Context& context) {
     context.expect(
         output != nullptr && !open_error &&
             output->mode() == CsvOutputMode::replay &&
+            !output->venue().has_value() &&
             output->audit_path(0U).empty(),
         "replay output set owns no audit files");
     if (!output) {

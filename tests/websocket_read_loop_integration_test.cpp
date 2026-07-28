@@ -1,3 +1,6 @@
+#include "hft/csv_output_set.h"
+#include "hft/live_capture_controller.h"
+#include "hft/live_subscription.h"
 #include "hft/spot_payload_parser.h"
 #include "hft/verified_websocket_session.h"
 
@@ -13,11 +16,16 @@
 #include <boost/beast/ssl.hpp>
 #include <boost/beast/websocket.hpp>
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -49,6 +57,7 @@ enum class Scenario : std::uint8_t {
     text_callback_failure,
     pause_resume,
     paused_stop,
+    live_controller,
 };
 
 struct ServerOutcome {
@@ -75,6 +84,48 @@ struct ClientOutcome {
     std::int64_t pause_delay_milliseconds{0};
     hft::WebSocketSessionResult terminal{};
 };
+
+struct ControllerOutcome {
+    bool created{false};
+    bool terminal_called{false};
+    bool controller_released{false};
+    hft::LiveCaptureCreateError create_error{};
+    hft::LiveCaptureResult terminal{};
+    std::string audit_bytes{};
+    std::string book_bytes{};
+};
+
+class TemporaryDirectory {
+public:
+    TemporaryDirectory() {
+        static std::uint64_t sequence{0U};
+        path_ = std::filesystem::temp_directory_path() /
+            ("hft_live_controller_" +
+             std::to_string(sequence++));
+        std::filesystem::create_directory(path_);
+    }
+
+    ~TemporaryDirectory() {
+        std::error_code ignored;
+        std::filesystem::remove_all(path_, ignored);
+    }
+
+    [[nodiscard]] const std::filesystem::path& path()
+        const noexcept {
+        return path_;
+    }
+
+private:
+    std::filesystem::path path_{};
+};
+
+[[nodiscard]] std::string read_binary_file(
+    const std::string& path) {
+    std::ifstream input{path, std::ios::binary};
+    return std::string{
+        std::istreambuf_iterator<char>{input},
+        std::istreambuf_iterator<char>{}};
+}
 
 template <typename Stream>
 void wait_for_peer_close(
@@ -286,12 +337,124 @@ void run_server(
                 }
                 wait_for_peer_close(stream, outcome);
                 return;
+            case Scenario::live_controller: {
+                constexpr std::array<std::string_view, 3U>
+                    messages{{
+                        R"({"stream":"btcusdt@depth5@100ms","data":{"lastUpdateId":100,"bids":[["100","1"]],"asks":[["101","2"]]}})",
+                        R"({"stream":"btcusdt@depth@100ms","data":{"e":"depthUpdate","E":2,"s":"BTCUSDT","U":101,"u":101,"b":[["100","3"]],"a":[]}})",
+                        R"({"stream":"btcusdt@trade","data":{"e":"trade","s":"BTCUSDT","p":"100","q":"1"}})",
+                    }};
+                stream.text(true);
+                for (const std::string_view message : messages) {
+                    stream.write(asio::buffer(message), error);
+                    if (error) {
+                        outcome.error =
+                            "controller message write: " +
+                            error.message();
+                        return;
+                    }
+                }
+                beast::flat_buffer buffer;
+                stream.read(buffer, error);
+                return;
+            }
         }
     } catch (const std::exception& error) {
         outcome.error = error.what();
     } catch (...) {
         outcome.error = "unknown server exception";
     }
+}
+
+ControllerOutcome run_controller_client(
+    const std::uint16_t port,
+    const std::string& ca_file) {
+    asio::io_context io_context;
+    ControllerOutcome outcome;
+    TemporaryDirectory parent;
+    constexpr std::array<std::string_view, 1U> symbols{
+        "BTCUSDT"};
+
+    hft::SubscriptionError subscription_error;
+    std::unique_ptr<hft::LiveSubscription> subscription =
+        hft::LiveSubscription::create(
+            hft::PayloadVenue::spot,
+            symbols.data(),
+            symbols.size(),
+            subscription_error);
+    if (!subscription) {
+        outcome.create_error.code =
+            hft::LiveCaptureCreateErrorCode::
+                invalid_subscription;
+        return outcome;
+    }
+
+    hft::OutputSetOpenError output_error;
+    std::unique_ptr<hft::CsvOutputSet> output =
+        hft::CsvOutputSet::open_live(
+            (parent.path() / "capture").string(),
+            hft::PayloadVenue::spot,
+            symbols.data(),
+            symbols.size(),
+            "2026-07-28",
+            output_error);
+    if (!output) {
+        outcome.create_error.code =
+            hft::LiveCaptureCreateErrorCode::invalid_output;
+        return outcome;
+    }
+    const std::string audit_path{output->audit_path(0U)};
+    const std::string book_path{
+        output->order_book_path(0U)};
+
+    hft::LiveCaptureCallbacks callbacks;
+    callbacks.on_terminal =
+        [&](const hft::LiveCaptureResult& result) {
+            outcome.terminal_called = true;
+            outcome.terminal = result;
+        };
+    std::shared_ptr<hft::LiveCaptureController> controller =
+        hft::LiveCaptureController::create(
+            io_context,
+            std::move(subscription),
+            std::move(output),
+            hft::test_websocket_endpoint(
+                "127.0.0.1",
+                std::to_string(port),
+                "localhost",
+                "/stream?streams=btcusdt@depth@100ms/"
+                "btcusdt@depth5@100ms/btcusdt@trade",
+                ca_file),
+            std::move(callbacks),
+            outcome.create_error);
+    if (!controller) {
+        return outcome;
+    }
+    outcome.created = true;
+    const std::weak_ptr<hft::LiveCaptureController>
+        weak_controller{controller};
+
+    asio::steady_timer stop_timer{io_context};
+    stop_timer.expires_after(std::chrono::seconds{1});
+    stop_timer.async_wait(
+        [weak_controller](
+            const boost::system::error_code& error) {
+            if (!error) {
+                if (const auto owner =
+                        weak_controller.lock()) {
+                    owner->stop();
+                }
+            }
+        });
+    controller->start();
+    controller.reset();
+    io_context.run();
+    outcome.controller_released = weak_controller.expired();
+    if (outcome.terminal_called) {
+        outcome.audit_bytes = read_binary_file(audit_path);
+        outcome.book_bytes = read_binary_file(book_path);
+    }
+    return outcome;
 }
 
 ClientOutcome run_client(
@@ -472,8 +635,15 @@ bool run_case(
                 scenario,
                 server_outcome);
         }};
-    const ClientOutcome client_outcome =
-        run_client(port, ca_file, scenario);
+    ClientOutcome client_outcome;
+    ControllerOutcome controller_outcome;
+    if (scenario == Scenario::live_controller) {
+        controller_outcome =
+            run_controller_client(port, ca_file);
+    } else {
+        client_outcome =
+            run_client(port, ca_file, scenario);
+    }
     server.join();
 
     bool success = true;
@@ -488,10 +658,12 @@ bool run_case(
     if (!server_outcome.error.empty()) {
         fail(server_outcome.error);
     }
-    if (!client_outcome.opened) {
+    if (scenario != Scenario::live_controller &&
+        !client_outcome.opened) {
         fail("client did not reach open state");
     }
-    if (!client_outcome.terminal_called) {
+    if (scenario != Scenario::live_controller &&
+        !client_outcome.terminal_called) {
         fail("terminal callback was not called");
     }
 
@@ -636,6 +808,47 @@ bool run_case(
                 fail("stop while paused did not close cleanly");
             }
             break;
+        case Scenario::live_controller:
+            if (!controller_outcome.created ||
+                controller_outcome.create_error ||
+                !controller_outcome.terminal_called ||
+                !controller_outcome.controller_released ||
+                !controller_outcome.terminal.success()) {
+                fail("controller did not stop and drain cleanly");
+                break;
+            }
+            if (controller_outcome.terminal.metrics.
+                        text_messages != 3U ||
+                controller_outcome.terminal.metrics.
+                        batches_published != 3U ||
+                controller_outcome.terminal.writer.metrics.
+                        audit_rows_written != 3U ||
+                controller_outcome.terminal.writer.metrics.
+                        order_book_rows_written != 2U ||
+                controller_outcome.terminal.session.
+                        last_connection_sequence != 3U) {
+                fail("controller accounting is inconsistent");
+            }
+            if (static_cast<std::size_t>(std::count(
+                    controller_outcome.audit_bytes.begin(),
+                    controller_outcome.audit_bytes.end(),
+                    '\n')) != 4U ||
+                static_cast<std::size_t>(std::count(
+                    controller_outcome.book_bytes.begin(),
+                    controller_outcome.book_bytes.end(),
+                    '\n')) != 3U ||
+                controller_outcome.audit_bytes.find(
+                    ",spot,depth5,0,0,1,BTCUSDT,") ==
+                    std::string::npos ||
+                controller_outcome.audit_bytes.find(
+                    ",spot,depth_diff,0,0,2,BTCUSDT,") ==
+                    std::string::npos ||
+                controller_outcome.audit_bytes.find(
+                    ",spot,trade,0,0,3,BTCUSDT,") ==
+                    std::string::npos) {
+                fail("controller output rows are incomplete or unordered");
+            }
+            break;
     }
     return success;
 }
@@ -681,6 +894,7 @@ int main(const int argc, const char* const* const argv) {
         "text-callback-failure");
     run(Scenario::pause_resume, "pause-resume");
     run(Scenario::paused_stop, "paused-stop");
+    run(Scenario::live_controller, "live-controller");
     if (success) {
         std::cout
             << "PASS: bounded WebSocket read loop integration\n";

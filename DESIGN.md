@@ -747,6 +747,25 @@ Backpressure policy:
 4. No market event or CSV row is silently dropped.
 5. A five-second pause-duration watchdog treats sustained storage backpressure as fatal before protocol liveness becomes ambiguous.
 
+The resume path uses a one-shot arm-and-recheck handshake. After pausing
+reads, the producer arms the writer notification and immediately rechecks the
+low-water predicate; the consumer performs the same atomic one-shot claim
+after releasing each slot. Consequently, a drain that races ahead of the arm
+cannot strand the session, and duplicate arms cannot produce duplicate
+resumes for one pause. The writer retains a type-erased lifetime token for
+the notification bridge, while the bridge holds only a weak controller
+reference. This keeps the cross-thread callback storage alive through writer
+join without creating a controller/writer ownership cycle.
+The same bridge carries a one-shot failure notification, so an asynchronous
+write, age-flush, or close failure enters controlled shutdown even when no
+later market message arrives to observe `writer.failed()`.
+Once started, the live controller retains one run-lifetime ownership
+reference until the session terminal callback has quiesced the producer and
+joined the writer. Releasing the caller's last reference during a writer
+notification therefore cannot destroy the controller on the writer thread
+or attempt a self-join; the run reference is released on the I/O thread only
+after terminal notification.
+
 Stopping reads briefly also delays processing control frames because WebSocket control frames are handled during reads. Queue sizing and watermarks must therefore make pauses exceptional and short. If the writer cannot recover promptly, an explicit fatal shutdown is safer than silently losing audit data or pretending the connection remains healthy.
 
 ## 15. WebSocket lifecycle

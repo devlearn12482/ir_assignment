@@ -141,6 +141,8 @@ public:
 
     [[nodiscard]] std::size_t target_count() const noexcept;
     [[nodiscard]] CsvOutputMode mode() const noexcept;
+    [[nodiscard]] std::optional<PayloadVenue> venue()
+        const noexcept;
     [[nodiscard]] std::optional<std::size_t> find_target(
         std::string_view normalized_symbol) const noexcept;
     [[nodiscard]] std::string_view symbol(
@@ -204,6 +206,7 @@ private:
         FileSinkError file_error = {}) noexcept;
 
     CsvOutputMode mode_{CsvOutputMode::live_capture};
+    std::optional<PayloadVenue> venue_{};
     std::shared_ptr<FileOperations> operations_{};
     std::string output_directory_{};
     std::array<TargetFiles, kMaxConfiguredSymbols> targets_{};
