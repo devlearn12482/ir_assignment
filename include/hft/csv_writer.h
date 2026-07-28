@@ -63,6 +63,24 @@ struct CsvWriterMetrics {
     std::uint64_t overflow_release_failures{0};
 };
 
+struct CsvWriterNotifications {
+    void* context{nullptr};
+    void (*notify_resume)(void*) noexcept{nullptr};
+    void (*notify_failure)(void*) noexcept{nullptr};
+    // Optional lifetime token for a callback bridge shared with the writer.
+    // It prevents a cross-thread notification from targeting destroyed
+    // controller state while shutdown joins the consumer.
+    std::shared_ptr<void> lifetime{};
+
+    [[nodiscard]] bool has_resume() const noexcept {
+        return context != nullptr && notify_resume != nullptr;
+    }
+
+    [[nodiscard]] bool has_failure() const noexcept {
+        return context != nullptr && notify_failure != nullptr;
+    }
+};
+
 struct CsvWriterResult {
     OutputSetWriteError output_error{};
     CsvWriterMetrics metrics{};
@@ -81,7 +99,8 @@ public:
     // thread. close() and join() are idempotent; join() implies close().
     [[nodiscard]] static std::unique_ptr<CsvWriter> start(
         std::unique_ptr<CsvOutputSet> output,
-        CsvWriterCreateError& error) noexcept;
+        CsvWriterCreateError& error,
+        CsvWriterNotifications notifications = {}) noexcept;
 
     CsvWriter(const CsvWriter&) = delete;
     CsvWriter& operator=(const CsvWriter&) = delete;
@@ -102,6 +121,10 @@ public:
     [[nodiscard]] CsvWriterOccupancy occupancy() const noexcept;
     [[nodiscard]] bool should_pause() const noexcept;
     [[nodiscard]] bool below_resume_watermark() const noexcept;
+    // Arms one notification for the next observation below the low-water
+    // mark. The callback may run synchronously here or on the writer thread;
+    // it must therefore be noexcept and only hand work to the I/O owner.
+    void arm_resume_notification() noexcept;
     [[nodiscard]] bool failed() const noexcept;
 
     void close() noexcept;
@@ -110,7 +133,9 @@ public:
 private:
     struct Impl;
 
-    explicit CsvWriter(std::unique_ptr<CsvOutputSet> output);
+    CsvWriter(
+        std::unique_ptr<CsvOutputSet> output,
+        CsvWriterNotifications notifications);
 
     std::unique_ptr<Impl> impl_;
 };

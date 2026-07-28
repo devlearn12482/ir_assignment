@@ -158,6 +158,50 @@ private:
     std::map<int, std::string> output_by_descriptor_{};
 };
 
+class ResumeNotification {
+public:
+    [[nodiscard]] CsvWriterNotifications
+    resume_notifier() noexcept {
+        return CsvWriterNotifications{
+            this, &ResumeNotification::notify, nullptr, {}};
+    }
+
+    [[nodiscard]] CsvWriterNotifications
+    failure_notifier() noexcept {
+        return CsvWriterNotifications{
+            this, nullptr, &ResumeNotification::notify, {}};
+    }
+
+    [[nodiscard]] bool wait_for_count(
+        const std::uint64_t expected) {
+        std::unique_lock<std::mutex> lock{mutex_};
+        return signalled_.wait_for(
+            lock,
+            std::chrono::seconds{3},
+            [this, expected]() noexcept {
+                return count_ >= expected;
+            });
+    }
+
+    [[nodiscard]] std::uint64_t count() const noexcept {
+        std::lock_guard<std::mutex> lock{mutex_};
+        return count_;
+    }
+
+private:
+    static void notify(void* const context) noexcept {
+        auto& self =
+            *static_cast<ResumeNotification*>(context);
+        std::lock_guard<std::mutex> lock{self.mutex_};
+        ++self.count_;
+        self.signalled_.notify_all();
+    }
+
+    mutable std::mutex mutex_{};
+    std::condition_variable signalled_{};
+    std::uint64_t count_{0};
+};
+
 [[nodiscard]] std::unique_ptr<CsvOutputSet> open_output(
     Context& context,
     const TemporaryDirectory& parent,
@@ -230,10 +274,12 @@ void fill_book(EventRowBatch& batch) {
 
 [[nodiscard]] std::unique_ptr<CsvWriter> start_writer(
     Context& context,
-    std::unique_ptr<CsvOutputSet> output) {
+    std::unique_ptr<CsvOutputSet> output,
+    const CsvWriterNotifications notifications = {}) {
     CsvWriterCreateError error;
     std::unique_ptr<CsvWriter> writer =
-        CsvWriter::start(std::move(output), error);
+        CsvWriter::start(
+            std::move(output), error, notifications);
     context.expect(
         writer != nullptr &&
             error == CsvWriterCreateError::none,
@@ -371,8 +417,11 @@ void test_write_failure_accounts_unwritten_rows(Context& context) {
     const int audit_descriptor =
         operations->descriptor_for(audit_path);
     operations->fail_next_write(audit_descriptor);
-    std::unique_ptr<CsvWriter> writer =
-        start_writer(context, std::move(output));
+    ResumeNotification failure_notification;
+    std::unique_ptr<CsvWriter> writer = start_writer(
+        context,
+        std::move(output),
+        failure_notification.failure_notifier());
     if (!writer) {
         return;
     }
@@ -400,7 +449,8 @@ void test_write_failure_accounts_unwritten_rows(Context& context) {
             result.metrics.audit_rows_published == 3U &&
             result.metrics.audit_rows_written == 0U &&
             result.metrics.audit_rows_unwritten == 3U &&
-            writer->failed(),
+            writer->failed() &&
+            failure_notification.count() == 1U,
         "shutdown write failure is visible and forces nonzero semantics");
 }
 
@@ -515,6 +565,78 @@ void test_slot_capacity_and_watermarks(Context& context) {
         "drain releases all slots below the resume watermark");
 }
 
+void test_one_shot_resume_notification(Context& context) {
+    TemporaryDirectory parent;
+    auto operations = std::make_shared<WriterFileOperations>();
+    std::string audit_path;
+    std::string book_path;
+    std::unique_ptr<CsvOutputSet> output = open_output(
+        context, parent, operations, audit_path, book_path);
+    if (!output) {
+        return;
+    }
+    ResumeNotification notification;
+    std::unique_ptr<CsvWriter> writer = start_writer(
+        context,
+        std::move(output),
+        notification.resume_notifier());
+    if (!writer) {
+        return;
+    }
+
+    operations->enable_blocking();
+    CsvWriterAcquireError acquire_error;
+    EventRowBatch* first = writer->try_acquire(acquire_error);
+    const std::string large_payload(
+        kCsvAggregationBufferBytes + 1U, 'r');
+    if (first) {
+        fill_audit(*first, 1U, large_payload);
+    }
+    context.expect(
+        first != nullptr &&
+            writer->publish(0U) ==
+                CsvWriterPublishError::none &&
+            operations->wait_until_blocked(),
+        "resume test blocks the writer deterministically");
+
+    std::uint64_t sequence = 2U;
+    while (!writer->should_pause()) {
+        EventRowBatch* const batch =
+            writer->try_acquire(acquire_error);
+        if (batch == nullptr) {
+            break;
+        }
+        fill_audit(*batch, sequence++);
+        if (writer->publish(0U) !=
+            CsvWriterPublishError::none) {
+            break;
+        }
+    }
+    context.expect(
+        writer->should_pause(),
+        "resume test reaches the high-water mark");
+
+    writer->arm_resume_notification();
+    writer->arm_resume_notification();
+    operations->release_writes();
+    context.expect(
+        notification.wait_for_count(1U) &&
+            notification.count() == 1U &&
+            writer->below_resume_watermark(),
+        "crossing low water produces one notification");
+
+    writer->arm_resume_notification();
+    context.expect(
+        notification.wait_for_count(2U) &&
+            notification.count() == 2U,
+        "arming after an earlier drain notifies synchronously");
+
+    const CsvWriterResult result = writer->join();
+    context.expect(
+        result.success(),
+        "resume-notification test drains without row loss");
+}
+
 }  // namespace
 
 void run_csv_writer_tests(Context& context) {
@@ -523,6 +645,7 @@ void run_csv_writer_tests(Context& context) {
     test_write_failure_accounts_unwritten_rows(context);
     test_one_second_age_flush(context);
     test_slot_capacity_and_watermarks(context);
+    test_one_shot_resume_notification(context);
 }
 
 }  // namespace hft::test

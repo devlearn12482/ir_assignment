@@ -83,7 +83,12 @@ struct CsvWriter::Impl {
     alignas(64) std::atomic<bool> writer_failed{false};
     alignas(64) std::atomic<bool> publish_active{false};
     alignas(64) std::atomic<bool> writer_sleeping{false};
+    alignas(64) std::atomic<bool>
+        resume_notification_armed{false};
+    alignas(64) std::atomic<bool>
+        failure_notification_sent{false};
 
+    CsvWriterNotifications notifications{};
     std::uint64_t producer_sequence{0};
     std::uint64_t producer_bytes{0};
     std::uint64_t producer_overflow_bytes{0};
@@ -94,8 +99,11 @@ struct CsvWriter::Impl {
     CsvWriterMetrics metrics{};
     CsvWriterResult final_result{};
 
-    explicit Impl(std::unique_ptr<CsvOutputSet> configured_output)
-        : output{std::move(configured_output)} {}
+    Impl(
+        std::unique_ptr<CsvOutputSet> configured_output,
+        const CsvWriterNotifications configured_notifications)
+        : output{std::move(configured_output)},
+          notifications{configured_notifications} {}
 
     [[nodiscard]] CsvWriterOccupancy occupancy() const noexcept {
         const std::uint64_t released =
@@ -131,6 +139,27 @@ struct CsvWriter::Impl {
         wake.notify_one();
     }
 
+    [[nodiscard]] bool consumer_below_resume_watermark()
+        const noexcept {
+        const std::uint64_t published =
+            published_sequence.load(std::memory_order_acquire);
+        const std::uint64_t published_bytes =
+            bytes_published.load(std::memory_order_acquire);
+        return published - consumer_sequence <
+                   static_cast<std::uint64_t>(kResumeSlots) &&
+               published_bytes - consumer_bytes < kResumeBytes;
+    }
+
+    void notify_resume_if_ready() noexcept {
+        if (!notifications.has_resume() ||
+            !consumer_below_resume_watermark() ||
+            !resume_notification_armed.exchange(
+                false, std::memory_order_acq_rel)) {
+            return;
+        }
+        notifications.notify_resume(notifications.context);
+    }
+
     void release_slot(Slot& slot) noexcept {
         consumer_bytes += slot.logical_bytes;
         consumer_overflow_bytes +=
@@ -149,6 +178,7 @@ struct CsvWriter::Impl {
             std::memory_order_release);
         released_sequence.store(
             consumer_sequence, std::memory_order_release);
+        notify_resume_if_ready();
     }
 
     void discard_published() noexcept {
@@ -168,6 +198,12 @@ struct CsvWriter::Impl {
             final_result.output_error = error;
         }
         writer_failed.store(true, std::memory_order_release);
+        if (notifications.has_failure() &&
+            !failure_notification_sent.exchange(
+                true, std::memory_order_acq_rel)) {
+            notifications.notify_failure(
+                notifications.context);
+        }
         while (publish_active.load(std::memory_order_acquire)) {
             std::this_thread::yield();
         }
@@ -273,7 +309,8 @@ struct CsvWriter::Impl {
 
 std::unique_ptr<CsvWriter> CsvWriter::start(
     std::unique_ptr<CsvOutputSet> output,
-    CsvWriterCreateError& error) noexcept {
+    CsvWriterCreateError& error,
+    const CsvWriterNotifications notifications) noexcept {
     error = CsvWriterCreateError::none;
     if (!output || output->closed() || output->failed() ||
         output->target_count() == 0U) {
@@ -282,7 +319,8 @@ std::unique_ptr<CsvWriter> CsvWriter::start(
     }
     try {
         std::unique_ptr<CsvWriter> writer{
-            new CsvWriter{std::move(output)}};
+            new CsvWriter{
+                std::move(output), notifications}};
         try {
             writer->impl_->thread = std::thread{
                 [impl = writer->impl_.get()]() noexcept {
@@ -303,8 +341,11 @@ std::unique_ptr<CsvWriter> CsvWriter::start(
     }
 }
 
-CsvWriter::CsvWriter(std::unique_ptr<CsvOutputSet> output)
-    : impl_{std::make_unique<Impl>(std::move(output))} {}
+CsvWriter::CsvWriter(
+    std::unique_ptr<CsvOutputSet> output,
+    const CsvWriterNotifications notifications)
+    : impl_{std::make_unique<Impl>(
+          std::move(output), notifications)} {}
 
 CsvWriter::~CsvWriter() noexcept {
     if (impl_) {
@@ -505,6 +546,22 @@ bool CsvWriter::below_resume_watermark() const noexcept {
     const CsvWriterOccupancy current = occupancy();
     return current.slots < kResumeSlots &&
            current.logical_bytes < kResumeBytes;
+}
+
+void CsvWriter::arm_resume_notification() noexcept {
+    if (!impl_ || !impl_->notifications.has_resume() ||
+        impl_->close_requested.load(std::memory_order_acquire) ||
+        impl_->writer_failed.load(std::memory_order_acquire)) {
+        return;
+    }
+    impl_->resume_notification_armed.store(
+        true, std::memory_order_release);
+    if (below_resume_watermark() &&
+        impl_->resume_notification_armed.exchange(
+            false, std::memory_order_acq_rel)) {
+        impl_->notifications.notify_resume(
+            impl_->notifications.context);
+    }
 }
 
 bool CsvWriter::failed() const noexcept {
