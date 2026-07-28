@@ -388,6 +388,8 @@ Replay uses the same processing/writer boundary. Its input loop replaces the Web
 13. `LiveEventPipeline` returns the completed audit row and optional snapshot row in one caller-owned batch; the live session controller publishes that batch as one `WriteBatch` ring slot.
 14. If the writer queue remains below the pause threshold, the session issues the next `async_read`.
 
+The read gate is strand-owned and idempotent. A pause requested synchronously inside the complete-text callback takes effect before step 14 and does not cancel or split the message that just completed. A pause requested while a read is already outstanding allows that one complete message to finish but suppresses its successor. Resume may be requested from another thread; it is serialized onto the session strand and issues at most one read.
+
 Processing order is the order of completed WebSocket messages on the single connection. Each per-symbol audit file contains that symbol's subsequence of the connection order; gaps in `conn_seq` are expected when intervening messages belong to another symbol or a malformed/binary message consumed a sequence value.
 
 ## 8. Envelope routing

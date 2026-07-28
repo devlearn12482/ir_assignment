@@ -145,10 +145,16 @@ public:
 
     ~VerifiedWebSocketSession() noexcept;
 
-    // Both methods are safe to call from outside the I/O thread. Every
+    // These methods are safe to call from outside the I/O thread. Every
     // transition and user callback is serialized through io_context.
     void start();
     void stop();
+    // pause_reads() never cancels an already-started complete-message read.
+    // When invoked synchronously from on_text_message it prevents the next
+    // read from being issued. resume_reads() is idempotent and issues at most
+    // one read when the session is open.
+    void pause_reads();
+    void resume_reads();
 
     [[nodiscard]] bool terminal() const noexcept;
 
