@@ -105,12 +105,14 @@ struct VerifiedWebSocketSession::Impl {
     Impl(
         asio::io_context& io_context,
         VerifiedWebSocketEndpoint configured_endpoint,
-        WebSocketSessionCallbacks configured_callbacks)
+        WebSocketSessionCallbacks configured_callbacks,
+        const std::uint64_t configured_connection_epoch)
         : strand{asio::make_strand(io_context)},
           resolver{strand},
           deadline{strand},
           endpoint{std::move(configured_endpoint)},
-          callbacks{std::move(configured_callbacks)} {}
+          callbacks{std::move(configured_callbacks)},
+          connection_epoch{configured_connection_epoch} {}
 
     [[nodiscard]] WebSocketSessionResult configure() {
         if (!valid_endpoint_text(endpoint.connect_host) ||
@@ -572,8 +574,15 @@ struct VerifiedWebSocketSession::Impl {
         }
         cancel_deadline();
         if (error) {
+            const long verification_result =
+                ::SSL_get_verify_result(
+                    websocket->next_layer().native_handle());
             finish(WebSocketSessionResult{
-                WebSocketSessionErrorCode::tls_handshake_failure,
+                verification_result == X509_V_OK
+                    ? WebSocketSessionErrorCode::
+                          tls_handshake_failure
+                    : WebSocketSessionErrorCode::
+                          tls_verification_failure,
                 WebSocketSessionStage::tls_handshake,
                 error});
             return;
@@ -749,6 +758,7 @@ VerifiedWebSocketSession::create(
     asio::io_context& io_context,
     VerifiedWebSocketEndpoint endpoint,
     WebSocketSessionCallbacks callbacks,
+    const std::uint64_t connection_epoch,
     WebSocketSessionResult& error) noexcept {
     error = {};
     try {
@@ -756,7 +766,8 @@ VerifiedWebSocketSession::create(
             new VerifiedWebSocketSession{
                 io_context,
                 std::move(endpoint),
-                std::move(callbacks)}};
+                std::move(callbacks),
+                connection_epoch}};
         error = session->impl_->configure();
         if (!error.success()) {
             return nullptr;
@@ -780,11 +791,13 @@ VerifiedWebSocketSession::create(
 VerifiedWebSocketSession::VerifiedWebSocketSession(
     asio::io_context& io_context,
     VerifiedWebSocketEndpoint endpoint,
-    WebSocketSessionCallbacks callbacks)
+    WebSocketSessionCallbacks callbacks,
+    const std::uint64_t connection_epoch)
     : impl_{std::make_unique<Impl>(
           io_context,
           std::move(endpoint),
-          std::move(callbacks))} {}
+          std::move(callbacks),
+          connection_epoch)} {}
 
 VerifiedWebSocketSession::~VerifiedWebSocketSession() noexcept = default;
 

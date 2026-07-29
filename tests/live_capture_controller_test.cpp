@@ -5,6 +5,7 @@
 #include "hft/live_subscription.h"
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -76,10 +77,44 @@ void test_output_venue_must_match_subscription(
         "controller rejects output from a different venue");
 }
 
+void test_invalid_reconnect_policy_is_rejected(
+    Context& context) {
+    constexpr std::array<std::string_view, 1U> symbols{
+        "BTCUSDT"};
+    SubscriptionError subscription_error;
+    std::unique_ptr<LiveSubscription> subscription =
+        LiveSubscription::create(
+            PayloadVenue::spot,
+            symbols.data(),
+            symbols.size(),
+            subscription_error);
+    boost::asio::io_context io_context;
+    LiveCaptureCreateError create_error;
+    LiveReconnectOptions reconnect_options;
+    reconnect_options.initial_backoff =
+        std::chrono::milliseconds{0};
+    const std::shared_ptr<LiveCaptureController> controller =
+        LiveCaptureController::create(
+            io_context,
+            std::move(subscription),
+            nullptr,
+            {},
+            {},
+            create_error,
+            reconnect_options);
+    context.expect(
+        controller == nullptr &&
+            create_error.code ==
+                LiveCaptureCreateErrorCode::
+                    invalid_reconnect_policy,
+        "controller rejects a zero reconnect delay");
+}
+
 }  // namespace
 
 void run_live_capture_controller_tests(Context& context) {
     test_output_venue_must_match_subscription(context);
+    test_invalid_reconnect_policy_is_rejected(context);
 }
 
 }  // namespace hft::test
