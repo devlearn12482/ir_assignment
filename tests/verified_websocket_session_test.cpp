@@ -50,6 +50,7 @@ void test_configuration_fails_before_network(Context& context) {
             io_context,
             VerifiedWebSocketEndpoint{},
             {},
+            0U,
             error);
     context.expect(
         !invalid &&
@@ -68,6 +69,7 @@ void test_configuration_fails_before_network(Context& context) {
                 "/stream?streams=btcusdt@trade",
                 "/definitely/not/a/real/test-ca.pem"),
             {},
+            0U,
             error);
     context.expect(
         !missing_ca &&
@@ -102,6 +104,7 @@ void test_cancel_reports_active_stage(Context& context) {
                 TrustStoreKind::system,
                 {}},
             std::move(callbacks),
+            0U,
             create_error);
     context.expect(
         session != nullptr,

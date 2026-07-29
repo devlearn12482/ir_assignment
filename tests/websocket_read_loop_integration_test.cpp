@@ -58,12 +58,17 @@ enum class Scenario : std::uint8_t {
     pause_resume,
     paused_stop,
     live_controller,
+    live_controller_reconnect,
+    live_controller_stop_backoff,
+    live_controller_binary_breaker,
+    live_controller_tls_retry,
 };
 
 struct ServerOutcome {
     std::string error{};
     std::string pong_payload{};
     std::uint32_t pong_count{0};
+    std::uint32_t websocket_accept_count{0};
     bool websocket_accepted{false};
 };
 
@@ -155,6 +160,121 @@ void run_server(
         context.use_private_key_file(
             private_key_file, ssl::context::pem);
 
+        if (scenario == Scenario::live_controller_tls_retry) {
+            Tcp::socket failed_socket{io_context};
+            boost::system::error_code failed_error;
+            acceptor.accept(failed_socket, failed_error);
+            if (failed_error) {
+                outcome.error =
+                    "pre-TLS accept: " +
+                    failed_error.message();
+                return;
+            }
+            failed_socket.shutdown(
+                Tcp::socket::shutdown_both, failed_error);
+            failed_socket.close(failed_error);
+        }
+
+        if (scenario == Scenario::live_controller_reconnect ||
+            scenario ==
+                Scenario::live_controller_stop_backoff ||
+            scenario ==
+                Scenario::live_controller_binary_breaker) {
+            constexpr std::array<std::string_view, 2U>
+                reconnect_messages{{
+                    R"({"stream":"btcusdt@depth5@100ms","data":{"lastUpdateId":100,"bids":[["100","1"]],"asks":[["101","2"]]}})",
+                    R"({"stream":"btcusdt@depth5@100ms","data":{"lastUpdateId":200,"bids":[["200","3"]],"asks":[["201","4"]]}})",
+                }};
+            const std::size_t connection_count =
+                scenario ==
+                        Scenario::live_controller_binary_breaker
+                    ? 3U
+                    : (scenario ==
+                               Scenario::
+                                   live_controller_stop_backoff
+                           ? 1U
+                           : reconnect_messages.size());
+            for (std::size_t index = 0U;
+                 index < connection_count;
+                 ++index) {
+                Tcp::socket reconnect_socket{io_context};
+                boost::system::error_code reconnect_error;
+                acceptor.accept(
+                    reconnect_socket, reconnect_error);
+                if (reconnect_error) {
+                    outcome.error =
+                        "reconnect accept: " +
+                        reconnect_error.message();
+                    return;
+                }
+                ssl::stream<Tcp::socket> reconnect_tls{
+                    std::move(reconnect_socket), context};
+                reconnect_tls.handshake(
+                    ssl::stream_base::server,
+                    reconnect_error);
+                if (reconnect_error) {
+                    outcome.error =
+                        "reconnect TLS handshake: " +
+                        reconnect_error.message();
+                    return;
+                }
+                websocket::stream<
+                    ssl::stream<Tcp::socket>,
+                    false>
+                    reconnect_stream{
+                        std::move(reconnect_tls)};
+                reconnect_stream.accept(reconnect_error);
+                if (reconnect_error) {
+                    outcome.error =
+                        "reconnect WebSocket accept: " +
+                        reconnect_error.message();
+                    return;
+                }
+                outcome.websocket_accepted = true;
+                ++outcome.websocket_accept_count;
+                if (scenario ==
+                    Scenario::live_controller_binary_breaker) {
+                    constexpr char binary_payload[]{"binary"};
+                    reconnect_stream.binary(true);
+                    reconnect_stream.write(
+                        asio::buffer(binary_payload),
+                        reconnect_error);
+                } else {
+                    reconnect_stream.text(true);
+                    reconnect_stream.write(
+                        asio::buffer(
+                            reconnect_messages[index]),
+                        reconnect_error);
+                }
+                if (reconnect_error) {
+                    outcome.error =
+                        "reconnect message write: " +
+                        reconnect_error.message();
+                    return;
+                }
+                if (scenario ==
+                    Scenario::live_controller_binary_breaker) {
+                    continue;
+                }
+                if (index == 0U) {
+                    reconnect_stream.close(
+                        websocket::close_code::normal,
+                        reconnect_error);
+                    if (reconnect_error) {
+                        outcome.error =
+                            "reconnect remote close: " +
+                            reconnect_error.message();
+                        return;
+                    }
+                } else {
+                    beast::flat_buffer close_buffer;
+                    reconnect_stream.read(
+                        close_buffer, reconnect_error);
+                }
+            }
+            return;
+        }
+
         Tcp::socket socket{io_context};
         boost::system::error_code error;
         acceptor.accept(socket, error);
@@ -181,6 +301,7 @@ void run_server(
             return;
         }
         outcome.websocket_accepted = true;
+        ++outcome.websocket_accept_count;
         stream.control_callback(
             [&](const websocket::frame_type kind,
                 const beast::string_view payload) {
@@ -358,6 +479,25 @@ void run_server(
                 stream.read(buffer, error);
                 return;
             }
+            case Scenario::live_controller_tls_retry: {
+                constexpr std::string_view message{
+                    R"({"stream":"btcusdt@depth5@100ms","data":{"lastUpdateId":300,"bids":[["300","1"]],"asks":[["301","2"]]}})"};
+                stream.text(true);
+                stream.write(asio::buffer(message), error);
+                if (error) {
+                    outcome.error =
+                        "post-TLS-retry message write: " +
+                        error.message();
+                    return;
+                }
+                beast::flat_buffer buffer;
+                stream.read(buffer, error);
+                return;
+            }
+            case Scenario::live_controller_reconnect:
+            case Scenario::live_controller_stop_backoff:
+            case Scenario::live_controller_binary_breaker:
+                return;
         }
     } catch (const std::exception& error) {
         outcome.error = error.what();
@@ -368,7 +508,8 @@ void run_server(
 
 ControllerOutcome run_controller_client(
     const std::uint16_t port,
-    const std::string& ca_file) {
+    const std::string& ca_file,
+    const Scenario scenario) {
     asio::io_context io_context;
     ControllerOutcome outcome;
     TemporaryDirectory parent;
@@ -413,6 +554,25 @@ ControllerOutcome run_controller_client(
             outcome.terminal_called = true;
             outcome.terminal = result;
         };
+    hft::LiveReconnectOptions reconnect_options;
+    reconnect_options.initial_backoff =
+        scenario ==
+                Scenario::live_controller_stop_backoff
+            ? std::chrono::milliseconds{2'000}
+            : std::chrono::milliseconds{10};
+    reconnect_options.maximum_backoff =
+        scenario ==
+                Scenario::live_controller_binary_breaker
+            ? std::chrono::milliseconds{40}
+            : reconnect_options.initial_backoff;
+    reconnect_options.stable_connection_reset =
+        std::chrono::milliseconds{100};
+    reconnect_options.select_inclusive =
+        [](void*,
+           const std::uint64_t lower,
+           const std::uint64_t) noexcept {
+            return lower;
+        };
     std::shared_ptr<hft::LiveCaptureController> controller =
         hft::LiveCaptureController::create(
             io_context,
@@ -426,7 +586,8 @@ ControllerOutcome run_controller_client(
                 "btcusdt@depth5@100ms/btcusdt@trade",
                 ca_file),
             std::move(callbacks),
-            outcome.create_error);
+            outcome.create_error,
+            reconnect_options);
     if (!controller) {
         return outcome;
     }
@@ -435,7 +596,18 @@ ControllerOutcome run_controller_client(
         weak_controller{controller};
 
     asio::steady_timer stop_timer{io_context};
-    stop_timer.expires_after(std::chrono::seconds{1});
+    stop_timer.expires_after(
+        scenario ==
+                Scenario::live_controller_reconnect ||
+            scenario ==
+                Scenario::live_controller_stop_backoff ||
+            scenario ==
+                Scenario::live_controller_tls_retry
+            ? std::chrono::milliseconds{300}
+            : (scenario ==
+                       Scenario::live_controller_binary_breaker
+                   ? std::chrono::milliseconds{500}
+                   : std::chrono::seconds{1}));
     stop_timer.async_wait(
         [weak_controller](
             const boost::system::error_code& error) {
@@ -588,6 +760,7 @@ ClientOutcome run_client(
             "/stream?streams=btcusdt@trade",
             ca_file),
         std::move(callbacks),
+        0U,
         create_error);
     if (!session) {
         outcome.terminal_called = true;
@@ -637,9 +810,16 @@ bool run_case(
         }};
     ClientOutcome client_outcome;
     ControllerOutcome controller_outcome;
-    if (scenario == Scenario::live_controller) {
+    if (scenario == Scenario::live_controller ||
+        scenario == Scenario::live_controller_reconnect ||
+        scenario ==
+            Scenario::live_controller_stop_backoff ||
+        scenario ==
+            Scenario::live_controller_binary_breaker ||
+        scenario ==
+            Scenario::live_controller_tls_retry) {
         controller_outcome =
-            run_controller_client(port, ca_file);
+            run_controller_client(port, ca_file, scenario);
     } else {
         client_outcome =
             run_client(port, ca_file, scenario);
@@ -659,10 +839,24 @@ bool run_case(
         fail(server_outcome.error);
     }
     if (scenario != Scenario::live_controller &&
+        scenario != Scenario::live_controller_reconnect &&
+        scenario !=
+            Scenario::live_controller_stop_backoff &&
+        scenario !=
+            Scenario::live_controller_binary_breaker &&
+        scenario !=
+            Scenario::live_controller_tls_retry &&
         !client_outcome.opened) {
         fail("client did not reach open state");
     }
     if (scenario != Scenario::live_controller &&
+        scenario != Scenario::live_controller_reconnect &&
+        scenario !=
+            Scenario::live_controller_stop_backoff &&
+        scenario !=
+            Scenario::live_controller_binary_breaker &&
+        scenario !=
+            Scenario::live_controller_tls_retry &&
         !client_outcome.terminal_called) {
         fail("terminal callback was not called");
     }
@@ -849,6 +1043,156 @@ bool run_case(
                 fail("controller output rows are incomplete or unordered");
             }
             break;
+        case Scenario::live_controller_reconnect:
+            if (server_outcome.websocket_accept_count != 2U) {
+                fail("server did not observe exactly two sessions");
+            }
+            if (!controller_outcome.created ||
+                controller_outcome.create_error ||
+                !controller_outcome.terminal_called ||
+                !controller_outcome.controller_released ||
+                !controller_outcome.terminal.success()) {
+                fail("reconnected controller did not drain cleanly");
+                break;
+            }
+            if (controller_outcome.terminal.metrics.
+                        connection_attempts != 2U ||
+                controller_outcome.terminal.metrics.
+                        successful_connections != 2U ||
+                controller_outcome.terminal.metrics.
+                        reconnects_scheduled != 1U ||
+                controller_outcome.terminal.metrics.
+                        recoverable_session_failures != 1U ||
+                controller_outcome.terminal.metrics.
+                        last_reconnect_delay_ms != 5U ||
+                controller_outcome.terminal.metrics.
+                        backoff_resets != 1U ||
+                controller_outcome.terminal.metrics.
+                        text_messages != 2U ||
+                controller_outcome.terminal.metrics.
+                        complete_messages != 2U ||
+                controller_outcome.terminal.metrics.
+                        batches_published != 2U ||
+                controller_outcome.terminal.writer.metrics.
+                        audit_rows_written != 2U ||
+                controller_outcome.terminal.writer.metrics.
+                        order_book_rows_written != 2U) {
+                fail("reconnect accounting is inconsistent");
+            }
+            if (static_cast<std::size_t>(std::count(
+                    controller_outcome.audit_bytes.begin(),
+                    controller_outcome.audit_bytes.end(),
+                    '\n')) != 3U ||
+                static_cast<std::size_t>(std::count(
+                    controller_outcome.book_bytes.begin(),
+                    controller_outcome.book_bytes.end(),
+                    '\n')) != 3U ||
+                controller_outcome.audit_bytes.find(
+                    ",spot,depth5,0,0,1,BTCUSDT,") ==
+                    std::string::npos ||
+                controller_outcome.audit_bytes.find(
+                    ",spot,depth5,0,1,1,BTCUSDT,") ==
+                    std::string::npos) {
+                fail("epoch or per-connection sequence did not reset");
+            }
+            break;
+        case Scenario::live_controller_stop_backoff:
+            if (server_outcome.websocket_accept_count != 1U) {
+                fail("stop-during-backoff opened another session");
+            }
+            if (!controller_outcome.created ||
+                controller_outcome.create_error ||
+                !controller_outcome.terminal_called ||
+                !controller_outcome.controller_released ||
+                !controller_outcome.terminal.success()) {
+                fail("stop during backoff did not drain cleanly");
+                break;
+            }
+            if (controller_outcome.terminal.metrics.
+                        connection_attempts != 1U ||
+                controller_outcome.terminal.metrics.
+                        successful_connections != 1U ||
+                controller_outcome.terminal.metrics.
+                        reconnects_scheduled != 1U ||
+                controller_outcome.terminal.metrics.
+                        recoverable_session_failures != 1U ||
+                controller_outcome.terminal.metrics.
+                        last_reconnect_delay_ms != 1'000U ||
+                controller_outcome.terminal.metrics.
+                        text_messages != 1U ||
+                controller_outcome.terminal.writer.metrics.
+                        audit_rows_written != 1U) {
+                fail("stop-during-backoff accounting is inconsistent");
+            }
+            break;
+        case Scenario::live_controller_binary_breaker:
+            if (server_outcome.websocket_accept_count != 3U) {
+                fail("binary breaker did not stop at three sessions");
+            }
+            if (!controller_outcome.created ||
+                controller_outcome.create_error ||
+                !controller_outcome.terminal_called ||
+                !controller_outcome.controller_released ||
+                controller_outcome.terminal.error !=
+                    hft::LiveCaptureErrorCode::
+                        message_policy_breaker ||
+                controller_outcome.terminal.success()) {
+                fail("binary breaker did not terminate fatally");
+                break;
+            }
+            if (controller_outcome.terminal.metrics.
+                        connection_attempts != 3U ||
+                controller_outcome.terminal.metrics.
+                        successful_connections != 3U ||
+                controller_outcome.terminal.metrics.
+                        reconnects_scheduled != 2U ||
+                controller_outcome.terminal.metrics.
+                        recoverable_session_failures != 2U ||
+                controller_outcome.terminal.metrics.
+                        last_reconnect_delay_ms != 10U ||
+                controller_outcome.terminal.metrics.
+                        binary_messages != 3U ||
+                controller_outcome.terminal.metrics.
+                        complete_messages != 3U ||
+                controller_outcome.terminal.metrics.
+                        pre_audit_rejections != 3U ||
+                controller_outcome.terminal.metrics.
+                        message_policy_breaker_trips != 1U ||
+                controller_outcome.terminal.writer.metrics.
+                        audit_rows_written != 0U) {
+                fail("binary-breaker accounting is inconsistent");
+            }
+            break;
+        case Scenario::live_controller_tls_retry:
+            if (server_outcome.websocket_accept_count != 1U) {
+                fail("TLS retry did not produce one open session");
+            }
+            if (!controller_outcome.created ||
+                controller_outcome.create_error ||
+                !controller_outcome.terminal_called ||
+                !controller_outcome.controller_released ||
+                !controller_outcome.terminal.success()) {
+                fail("controller did not recover from transient TLS loss");
+                break;
+            }
+            if (controller_outcome.terminal.metrics.
+                        connection_attempts != 2U ||
+                controller_outcome.terminal.metrics.
+                        successful_connections != 1U ||
+                controller_outcome.terminal.metrics.
+                        reconnects_scheduled != 1U ||
+                controller_outcome.terminal.metrics.
+                        recoverable_session_failures != 1U ||
+                controller_outcome.terminal.metrics.
+                        text_messages != 1U ||
+                controller_outcome.terminal.writer.metrics.
+                        audit_rows_written != 1U ||
+                controller_outcome.audit_bytes.find(
+                    ",spot,depth5,0,0,1,BTCUSDT,") ==
+                    std::string::npos) {
+                fail("failed TLS attempt consumed epoch or sequence");
+            }
+            break;
     }
     return success;
 }
@@ -895,6 +1239,18 @@ int main(const int argc, const char* const* const argv) {
     run(Scenario::pause_resume, "pause-resume");
     run(Scenario::paused_stop, "paused-stop");
     run(Scenario::live_controller, "live-controller");
+    run(
+        Scenario::live_controller_reconnect,
+        "live-controller-reconnect");
+    run(
+        Scenario::live_controller_stop_backoff,
+        "live-controller-stop-backoff");
+    run(
+        Scenario::live_controller_binary_breaker,
+        "live-controller-binary-breaker");
+    run(
+        Scenario::live_controller_tls_retry,
+        "live-controller-tls-retry");
     if (success) {
         std::cout
             << "PASS: bounded WebSocket read loop integration\n";

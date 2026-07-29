@@ -50,6 +50,7 @@ enum class WebSocketSessionErrorCode : std::uint8_t {
     resolve_failure,
     connect_failure,
     sni_failure,
+    tls_verification_failure,
     tls_handshake_failure,
     websocket_handshake_failure,
     read_failure,
@@ -134,6 +135,7 @@ public:
         boost::asio::io_context& io_context,
         VerifiedWebSocketEndpoint endpoint,
         WebSocketSessionCallbacks callbacks,
+        std::uint64_t connection_epoch,
         WebSocketSessionResult& error) noexcept;
 
     VerifiedWebSocketSession(const VerifiedWebSocketSession&) = delete;
@@ -164,7 +166,8 @@ private:
     VerifiedWebSocketSession(
         boost::asio::io_context& io_context,
         VerifiedWebSocketEndpoint endpoint,
-        WebSocketSessionCallbacks callbacks);
+        WebSocketSessionCallbacks callbacks,
+        std::uint64_t connection_epoch);
 
     std::unique_ptr<Impl> impl_;
 };
@@ -215,6 +218,9 @@ private:
             return "connect_failure";
         case WebSocketSessionErrorCode::sni_failure:
             return "sni_failure";
+        case WebSocketSessionErrorCode::
+                tls_verification_failure:
+            return "tls_verification_failure";
         case WebSocketSessionErrorCode::tls_handshake_failure:
             return "tls_handshake_failure";
         case WebSocketSessionErrorCode::websocket_handshake_failure:

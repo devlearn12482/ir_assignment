@@ -145,7 +145,11 @@ ClientOutcome run_client(
 
     hft::WebSocketSessionResult create_error;
     session = hft::VerifiedWebSocketSession::create(
-        io_context, endpoint, std::move(callbacks), create_error);
+        io_context,
+        endpoint,
+        std::move(callbacks),
+        0U,
+        create_error);
     if (!session) {
         outcome.terminal_called = true;
         outcome.terminal = create_error;
@@ -242,7 +246,7 @@ bool run_case(
         }
         if (client_outcome.terminal.code !=
                 hft::WebSocketSessionErrorCode::
-                    tls_handshake_failure ||
+                    tls_verification_failure ||
             client_outcome.terminal.stage !=
                 hft::WebSocketSessionStage::tls_handshake ||
             !client_outcome.terminal.native_error) {

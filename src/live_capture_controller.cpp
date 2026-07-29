@@ -4,15 +4,59 @@
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <limits>
 #include <new>
+#include <random>
 #include <utility>
 
 namespace hft {
 namespace {
 
 constexpr auto kBackpressureTimeout = std::chrono::seconds{5};
+constexpr std::uint64_t kMessagePolicyBreakerLimit = 3U;
+
+[[nodiscard]] bool valid_reconnect_options(
+    const LiveReconnectOptions& options) noexcept {
+    return options.initial_backoff.count() > 0 &&
+           options.maximum_backoff >= options.initial_backoff &&
+           options.stable_connection_reset.count() > 0;
+}
+
+[[nodiscard]] bool recoverable_session_error(
+    const WebSocketSessionErrorCode code) noexcept {
+    switch (code) {
+        case WebSocketSessionErrorCode::resolve_failure:
+        case WebSocketSessionErrorCode::connect_failure:
+        case WebSocketSessionErrorCode::
+                websocket_handshake_failure:
+        case WebSocketSessionErrorCode::tls_handshake_failure:
+        case WebSocketSessionErrorCode::read_failure:
+        case WebSocketSessionErrorCode::incomplete_message:
+        case WebSocketSessionErrorCode::binary_message:
+        case WebSocketSessionErrorCode::message_too_big:
+        case WebSocketSessionErrorCode::remote_close:
+        case WebSocketSessionErrorCode::timeout:
+            return true;
+        case WebSocketSessionErrorCode::none:
+        case WebSocketSessionErrorCode::invalid_configuration:
+        case WebSocketSessionErrorCode::allocation_failure:
+        case WebSocketSessionErrorCode::trust_store_failure:
+        case WebSocketSessionErrorCode::tls_policy_failure:
+        case WebSocketSessionErrorCode::sni_failure:
+        case WebSocketSessionErrorCode::
+                tls_verification_failure:
+        case WebSocketSessionErrorCode::sequence_overflow:
+        case WebSocketSessionErrorCode::timestamp_failure:
+        case WebSocketSessionErrorCode::close_failure:
+        case WebSocketSessionErrorCode::callback_failure:
+        case WebSocketSessionErrorCode::cancelled:
+            return false;
+    }
+    return false;
+}
 
 }  // namespace
 
@@ -23,18 +67,29 @@ struct LiveCaptureController::Impl {
 
     boost::asio::io_context& io_context;
     boost::asio::steady_timer backpressure_timer;
+    boost::asio::steady_timer reconnect_timer;
+    boost::asio::steady_timer stability_timer;
     std::unique_ptr<LiveSubscription> subscription;
     std::unique_ptr<LiveEventPipeline> pipeline;
     std::unique_ptr<CsvWriter> writer;
     std::shared_ptr<VerifiedWebSocketSession> session;
     std::shared_ptr<WriterResumeBridge> resume_bridge;
     std::shared_ptr<LiveCaptureController> run_lifetime;
+    VerifiedWebSocketEndpoint endpoint;
     LiveCaptureCallbacks callbacks;
+    LiveReconnectOptions reconnect_options;
+    std::mt19937_64 random{std::random_device{}()};
     LiveCaptureResult result{};
     std::atomic<bool> stop_requested{false};
     std::atomic<bool> terminal{false};
     std::atomic<bool> resume_post_failed{false};
+    std::uint64_t generation{1U};
+    std::uint64_t next_connection_epoch{0U};
+    std::uint64_t reconnect_attempt{0U};
+    std::uint64_t consecutive_message_policy_failures{0U};
     bool started{false};
+    bool session_open{false};
+    bool epoch_exhausted{false};
     bool reads_paused{false};
     bool failure_latched{false};
     bool terminal_started{false};
@@ -42,11 +97,56 @@ struct LiveCaptureController::Impl {
     Impl(
         boost::asio::io_context& configured_io_context,
         std::unique_ptr<LiveSubscription> configured_subscription,
-        LiveCaptureCallbacks configured_callbacks)
+        VerifiedWebSocketEndpoint configured_endpoint,
+        LiveCaptureCallbacks configured_callbacks,
+        LiveReconnectOptions configured_reconnect_options)
         : io_context{configured_io_context},
           backpressure_timer{configured_io_context},
+          reconnect_timer{configured_io_context},
+          stability_timer{configured_io_context},
           subscription{std::move(configured_subscription)},
-          callbacks{std::move(configured_callbacks)} {}
+          endpoint{std::move(configured_endpoint)},
+          callbacks{std::move(configured_callbacks)},
+          reconnect_options{
+              std::move(configured_reconnect_options)} {}
+
+    [[nodiscard]] std::chrono::milliseconds
+    select_reconnect_delay() {
+        const std::uint64_t initial = static_cast<std::uint64_t>(
+            reconnect_options.initial_backoff.count());
+        const std::uint64_t maximum = static_cast<std::uint64_t>(
+            reconnect_options.maximum_backoff.count());
+        std::uint64_t cap = initial;
+        for (std::uint64_t index = 0U;
+             index < reconnect_attempt && cap < maximum;
+             ++index) {
+            if (cap > maximum / 2U) {
+                cap = maximum;
+            } else {
+                cap *= 2U;
+            }
+        }
+        cap = std::min(cap, maximum);
+        const std::uint64_t lower = cap / 2U;
+        std::uint64_t selected = lower;
+        if (reconnect_options.select_inclusive != nullptr) {
+            selected =
+                reconnect_options.select_inclusive(
+                    reconnect_options.jitter_context,
+                    lower,
+                    cap);
+            selected = std::max(lower, std::min(selected, cap));
+        } else {
+            std::uniform_int_distribution<std::uint64_t>
+                distribution{lower, cap};
+            selected = distribution(random);
+        }
+        if (reconnect_attempt !=
+            std::numeric_limits<std::uint64_t>::max()) {
+            ++reconnect_attempt;
+        }
+        return std::chrono::milliseconds{selected};
+    }
 };
 
 std::shared_ptr<LiveCaptureController>
@@ -56,11 +156,17 @@ LiveCaptureController::create(
     std::unique_ptr<CsvOutputSet> output,
     VerifiedWebSocketEndpoint endpoint,
     LiveCaptureCallbacks callbacks,
-    LiveCaptureCreateError& error) noexcept {
+    LiveCaptureCreateError& error,
+    LiveReconnectOptions reconnect_options) noexcept {
     error = {};
     if (!subscription || subscription->symbol_count() == 0U) {
         error.code =
             LiveCaptureCreateErrorCode::invalid_subscription;
+        return nullptr;
+    }
+    if (!valid_reconnect_options(reconnect_options)) {
+        error.code =
+            LiveCaptureCreateErrorCode::invalid_reconnect_policy;
         return nullptr;
     }
     try {
@@ -68,7 +174,9 @@ LiveCaptureController::create(
             new LiveCaptureController{
                 io_context,
                 std::move(subscription),
-                std::move(callbacks)}};
+                std::move(endpoint),
+                std::move(callbacks),
+                std::move(reconnect_options)}};
         if (!output ||
             !controller->output_matches_subscription(*output)) {
             error.code = LiveCaptureCreateErrorCode::invalid_output;
@@ -104,39 +212,10 @@ LiveCaptureController::create(
             return nullptr;
         }
 
-        const std::weak_ptr<LiveCaptureController> weak{
-            controller};
-        WebSocketSessionCallbacks session_callbacks;
-        session_callbacks.on_open = [weak]() {
-            if (const auto owner = weak.lock()) {
-                owner->on_open();
-            }
-        };
-        session_callbacks.on_text_message =
-            [weak](const WebSocketTextMessage& message) {
-                if (const auto owner = weak.lock()) {
-                    owner->on_text_message(message);
-                }
-            };
-        session_callbacks.on_control =
-            [weak](const WebSocketControlFrame& frame) noexcept {
-                if (const auto owner = weak.lock()) {
-                    owner->on_control(frame);
-                }
-            };
-        session_callbacks.on_terminal =
-            [weak](WebSocketSessionResult result) noexcept {
-                if (const auto owner = weak.lock()) {
-                    owner->on_session_terminal(result);
-                }
-            };
-        controller->impl_->session =
-            VerifiedWebSocketSession::create(
-                io_context,
-                std::move(endpoint),
-                std::move(session_callbacks),
-                error.session_error);
-        if (!controller->impl_->session) {
+        if (!controller->create_session(
+                controller->impl_->generation,
+                controller->impl_->next_connection_epoch,
+                error.session_error)) {
             static_cast<void>(
                 controller->impl_->writer->join());
             error.code = LiveCaptureCreateErrorCode::
@@ -156,11 +235,15 @@ LiveCaptureController::create(
 LiveCaptureController::LiveCaptureController(
     boost::asio::io_context& io_context,
     std::unique_ptr<LiveSubscription> subscription,
-    LiveCaptureCallbacks callbacks)
+    VerifiedWebSocketEndpoint endpoint,
+    LiveCaptureCallbacks callbacks,
+    LiveReconnectOptions reconnect_options)
     : impl_{std::make_unique<Impl>(
           io_context,
           std::move(subscription),
-          std::move(callbacks))} {}
+          std::move(endpoint),
+          std::move(callbacks),
+          std::move(reconnect_options))} {}
 
 LiveCaptureController::~LiveCaptureController() noexcept {
     if (!impl_) {
@@ -168,6 +251,8 @@ LiveCaptureController::~LiveCaptureController() noexcept {
     }
     boost::system::error_code ignored;
     impl_->backpressure_timer.cancel(ignored);
+    impl_->reconnect_timer.cancel(ignored);
+    impl_->stability_timer.cancel(ignored);
     if (impl_->session && !impl_->session->terminal()) {
         try {
             impl_->session->stop();
@@ -199,6 +284,49 @@ bool LiveCaptureController::output_matches_subscription(
     return true;
 }
 
+bool LiveCaptureController::create_session(
+    const std::uint64_t generation,
+    const std::uint64_t connection_epoch,
+    WebSocketSessionResult& error) noexcept {
+    const std::weak_ptr<LiveCaptureController> weak{
+        weak_from_this()};
+    WebSocketSessionCallbacks session_callbacks;
+    session_callbacks.on_open = [weak, generation]() {
+        if (const auto owner = weak.lock()) {
+            owner->on_open(generation);
+        }
+    };
+    session_callbacks.on_text_message =
+        [weak, generation](
+            const WebSocketTextMessage& message) {
+            if (const auto owner = weak.lock()) {
+                owner->on_text_message(generation, message);
+            }
+        };
+    session_callbacks.on_control =
+        [weak, generation](
+            const WebSocketControlFrame& frame) noexcept {
+            if (const auto owner = weak.lock()) {
+                owner->on_control(generation, frame);
+            }
+        };
+    session_callbacks.on_terminal =
+        [weak, generation](
+            WebSocketSessionResult result) noexcept {
+            if (const auto owner = weak.lock()) {
+                owner->on_session_terminal(
+                    generation, result);
+            }
+        };
+    impl_->session = VerifiedWebSocketSession::create(
+        impl_->io_context,
+        impl_->endpoint,
+        std::move(session_callbacks),
+        connection_epoch,
+        error);
+    return impl_->session != nullptr;
+}
+
 void LiveCaptureController::start() {
     if (!impl_ || impl_->started ||
         impl_->terminal.load(std::memory_order_acquire)) {
@@ -207,12 +335,21 @@ void LiveCaptureController::start() {
     impl_->started = true;
     impl_->run_lifetime = shared_from_this();
     try {
-        impl_->session->start();
+        start_current_session();
     } catch (...) {
         impl_->run_lifetime.reset();
         impl_->started = false;
         throw;
     }
+}
+
+void LiveCaptureController::start_current_session() {
+    if (!impl_->session) {
+        fail(LiveCaptureErrorCode::reconnect_scheduling_failure);
+        return;
+    }
+    ++impl_->result.metrics.connection_attempts;
+    impl_->session->start();
 }
 
 void LiveCaptureController::stop() {
@@ -221,7 +358,36 @@ void LiveCaptureController::stop() {
         return;
     }
     impl_->stop_requested.store(true, std::memory_order_release);
-    impl_->session->stop();
+    const std::weak_ptr<LiveCaptureController> weak{
+        weak_from_this()};
+    boost::asio::post(
+        impl_->io_context,
+        [weak]() noexcept {
+            if (const auto owner = weak.lock()) {
+                owner->request_stop_on_io();
+            }
+        });
+}
+
+void LiveCaptureController::request_stop_on_io() noexcept {
+    if (impl_->terminal.load(std::memory_order_acquire) ||
+        impl_->terminal_started) {
+        return;
+    }
+    boost::system::error_code ignored;
+    impl_->reconnect_timer.cancel(ignored);
+    impl_->stability_timer.cancel(ignored);
+    if (impl_->session && !impl_->session->terminal()) {
+        try {
+            impl_->session->stop();
+            return;
+        } catch (...) {
+            impl_->result.error =
+                LiveCaptureErrorCode::resume_notification_failure;
+            impl_->failure_latched = true;
+        }
+    }
+    finalize_run();
 }
 
 bool LiveCaptureController::terminal() const noexcept {
@@ -234,23 +400,72 @@ const LiveCaptureResult& LiveCaptureController::result()
     return impl_->result;
 }
 
-void LiveCaptureController::on_open() {
+void LiveCaptureController::on_open(
+    const std::uint64_t generation) {
+    if (generation != impl_->generation) {
+        ++impl_->result.metrics.stale_session_callbacks;
+        return;
+    }
+    impl_->session_open = true;
+    ++impl_->result.metrics.successful_connections;
+    if (impl_->next_connection_epoch ==
+        std::numeric_limits<std::uint64_t>::max()) {
+        impl_->epoch_exhausted = true;
+    } else {
+        ++impl_->next_connection_epoch;
+    }
+
+    impl_->stability_timer.expires_after(
+        impl_->reconnect_options.stable_connection_reset);
+    const std::weak_ptr<LiveCaptureController> weak{
+        weak_from_this()};
+    impl_->stability_timer.async_wait(
+        [weak, generation](
+            const boost::system::error_code& error) noexcept {
+            if (const auto owner = weak.lock()) {
+                owner->on_stable_connection(
+                    generation, error);
+            }
+        });
+
     if (impl_->stop_requested.load(std::memory_order_acquire)) {
-        try {
-            impl_->session->stop();
-        } catch (...) {
-            fail(LiveCaptureErrorCode::resume_notification_failure);
-        }
+        request_stop_on_io();
+        return;
+    }
+    if (impl_->writer->should_pause()) {
+        pause_for_backpressure();
     }
 }
 
+void LiveCaptureController::on_stable_connection(
+    const std::uint64_t generation,
+    const boost::system::error_code& error) noexcept {
+    if (error == boost::asio::error::operation_aborted ||
+        impl_->terminal.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (generation != impl_->generation ||
+        !impl_->session_open) {
+        ++impl_->result.metrics.stale_session_callbacks;
+        return;
+    }
+    impl_->reconnect_attempt = 0U;
+    ++impl_->result.metrics.backoff_resets;
+}
+
 void LiveCaptureController::on_text_message(
+    const std::uint64_t generation,
     const WebSocketTextMessage& message) {
+    if (generation != impl_->generation) {
+        ++impl_->result.metrics.stale_session_callbacks;
+        return;
+    }
     if (impl_->terminal.load(std::memory_order_acquire) ||
         impl_->failure_latched) {
         return;
     }
     ++impl_->result.metrics.text_messages;
+    ++impl_->result.metrics.complete_messages;
 
     CsvWriterAcquireError acquire_error;
     EventRowBatch* const batch =
@@ -294,13 +509,19 @@ void LiveCaptureController::on_text_message(
         return;
     }
     ++impl_->result.metrics.batches_published;
+    impl_->consecutive_message_policy_failures = 0U;
     if (impl_->writer->should_pause()) {
         pause_for_backpressure();
     }
 }
 
 void LiveCaptureController::on_control(
+    const std::uint64_t generation,
     const WebSocketControlFrame& frame) noexcept {
+    if (generation != impl_->generation) {
+        ++impl_->result.metrics.stale_session_callbacks;
+        return;
+    }
     switch (frame.kind) {
         case WebSocketControlKind::ping:
             ++impl_->result.metrics.ping_frames;
@@ -315,32 +536,168 @@ void LiveCaptureController::on_control(
 }
 
 void LiveCaptureController::on_session_terminal(
+    const std::uint64_t generation,
     const WebSocketSessionResult session_result) noexcept {
+    if (generation != impl_->generation) {
+        ++impl_->result.metrics.stale_session_callbacks;
+        return;
+    }
+    boost::system::error_code ignored;
+    impl_->backpressure_timer.cancel(ignored);
+    impl_->stability_timer.cancel(ignored);
+    impl_->reads_paused = false;
+    impl_->session_open = false;
+    impl_->pipeline->invalidate_all();
+    impl_->result.session = session_result;
+    impl_->session.reset();
+
+    if (session_result.code ==
+        WebSocketSessionErrorCode::binary_message) {
+        ++impl_->result.metrics.complete_messages;
+        ++impl_->result.metrics.pre_audit_rejections;
+        ++impl_->result.metrics.binary_messages;
+        ++impl_->consecutive_message_policy_failures;
+    } else if (session_result.code ==
+               WebSocketSessionErrorCode::message_too_big) {
+        ++impl_->result.metrics.oversized_messages;
+        ++impl_->consecutive_message_policy_failures;
+    }
+
+    if (impl_->consecutive_message_policy_failures >=
+        kMessagePolicyBreakerLimit) {
+        ++impl_->result.metrics.message_policy_breaker_trips;
+        impl_->failure_latched = true;
+        impl_->result.error =
+            LiveCaptureErrorCode::message_policy_breaker;
+    }
+
+    impl_->result.stop_requested =
+        impl_->stop_requested.load(std::memory_order_acquire);
+    if (impl_->resume_post_failed.load(
+            std::memory_order_acquire)) {
+        impl_->failure_latched = true;
+        impl_->result.error =
+            LiveCaptureErrorCode::resume_notification_failure;
+    }
+    if (impl_->result.stop_requested) {
+        const bool expected_stop_result =
+            session_result.success() ||
+            session_result.code ==
+                WebSocketSessionErrorCode::cancelled;
+        if (!expected_stop_result &&
+            !impl_->failure_latched) {
+            impl_->failure_latched = true;
+            impl_->result.error =
+                LiveCaptureErrorCode::session_failure;
+        }
+        finalize_run();
+        return;
+    }
+    if (impl_->failure_latched) {
+        finalize_run();
+        return;
+    }
+    if (!recoverable_session_error(session_result.code)) {
+        impl_->failure_latched = true;
+        impl_->result.error =
+            LiveCaptureErrorCode::session_failure;
+        finalize_run();
+        return;
+    }
+    if (impl_->epoch_exhausted) {
+        impl_->failure_latched = true;
+        impl_->result.error =
+            LiveCaptureErrorCode::connection_epoch_overflow;
+        finalize_run();
+        return;
+    }
+    ++impl_->result.metrics.recoverable_session_failures;
+    schedule_reconnect();
+}
+
+void LiveCaptureController::schedule_reconnect() noexcept {
+    try {
+        const std::chrono::milliseconds delay =
+            impl_->select_reconnect_delay();
+        ++impl_->result.metrics.reconnects_scheduled;
+        impl_->result.metrics.last_reconnect_delay_ms =
+            static_cast<std::uint64_t>(delay.count());
+        impl_->reconnect_timer.expires_after(delay);
+        const std::weak_ptr<LiveCaptureController> weak{
+            weak_from_this()};
+        impl_->reconnect_timer.async_wait(
+            [weak](
+                const boost::system::error_code& error) noexcept {
+                if (const auto owner = weak.lock()) {
+                    owner->on_reconnect_timer(error);
+                }
+            });
+    } catch (...) {
+        impl_->failure_latched = true;
+        impl_->result.error =
+            LiveCaptureErrorCode::reconnect_scheduling_failure;
+        finalize_run();
+    }
+}
+
+void LiveCaptureController::on_reconnect_timer(
+    const boost::system::error_code& error) noexcept {
+    if (error == boost::asio::error::operation_aborted ||
+        impl_->terminal.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (error) {
+        impl_->failure_latched = true;
+        impl_->result.error =
+            LiveCaptureErrorCode::reconnect_scheduling_failure;
+        finalize_run();
+        return;
+    }
+    if (impl_->stop_requested.load(std::memory_order_acquire)) {
+        finalize_run();
+        return;
+    }
+    if (impl_->generation ==
+        std::numeric_limits<std::uint64_t>::max()) {
+        impl_->failure_latched = true;
+        impl_->result.error =
+            LiveCaptureErrorCode::reconnect_scheduling_failure;
+        finalize_run();
+        return;
+    }
+    ++impl_->generation;
+    WebSocketSessionResult create_error;
+    if (!create_session(
+            impl_->generation,
+            impl_->next_connection_epoch,
+            create_error)) {
+        impl_->result.session = create_error;
+        impl_->failure_latched = true;
+        impl_->result.error = LiveCaptureErrorCode::session_failure;
+        finalize_run();
+        return;
+    }
+    try {
+        start_current_session();
+    } catch (...) {
+        impl_->failure_latched = true;
+        impl_->result.error =
+            LiveCaptureErrorCode::reconnect_scheduling_failure;
+        finalize_run();
+    }
+}
+
+void LiveCaptureController::finalize_run() noexcept {
     if (impl_->terminal_started) {
         return;
     }
     impl_->terminal_started = true;
     boost::system::error_code ignored;
     impl_->backpressure_timer.cancel(ignored);
-    impl_->pipeline->invalidate_all();
-    impl_->result.session = session_result;
+    impl_->reconnect_timer.cancel(ignored);
+    impl_->stability_timer.cancel(ignored);
     impl_->result.stop_requested =
         impl_->stop_requested.load(std::memory_order_acquire);
-    if (impl_->resume_post_failed.load(
-            std::memory_order_acquire)) {
-        impl_->result.error =
-            LiveCaptureErrorCode::resume_notification_failure;
-    } else if (!impl_->failure_latched) {
-        const bool expected_stop_result =
-            impl_->result.stop_requested &&
-            (session_result.success() ||
-             session_result.code ==
-                 WebSocketSessionErrorCode::cancelled);
-        if (!expected_stop_result) {
-            impl_->result.error =
-                LiveCaptureErrorCode::session_failure;
-        }
-    }
     impl_->result.writer = impl_->writer->join();
     if (!impl_->result.writer.success() &&
         impl_->result.error == LiveCaptureErrorCode::none) {
@@ -360,7 +717,8 @@ void LiveCaptureController::on_session_terminal(
 }
 
 void LiveCaptureController::pause_for_backpressure() {
-    if (impl_->reads_paused || impl_->failure_latched) {
+    if (impl_->reads_paused || impl_->failure_latched ||
+        !impl_->session) {
         return;
     }
     impl_->reads_paused = true;
@@ -405,7 +763,9 @@ void LiveCaptureController::post_resume_from_writer() noexcept {
         impl_->resume_post_failed.store(
             true, std::memory_order_release);
         try {
-            impl_->session->stop();
+            if (impl_->session) {
+                impl_->session->stop();
+            }
         } catch (...) {
             impl_->io_context.stop();
         }
@@ -436,7 +796,9 @@ void LiveCaptureController::on_writer_resume() noexcept {
     boost::system::error_code ignored;
     impl_->backpressure_timer.cancel(ignored);
     try {
-        impl_->session->resume_reads();
+        if (impl_->session) {
+            impl_->session->resume_reads();
+        }
     } catch (...) {
         fail(LiveCaptureErrorCode::resume_notification_failure);
     }
@@ -463,14 +825,20 @@ void LiveCaptureController::fail(
     }
     impl_->failure_latched = true;
     impl_->result.error = error;
+    boost::system::error_code ignored;
+    impl_->reconnect_timer.cancel(ignored);
+    impl_->stability_timer.cancel(ignored);
     try {
-        impl_->session->pause_reads();
-        impl_->session->stop();
+        if (impl_->session && !impl_->session->terminal()) {
+            impl_->session->pause_reads();
+            impl_->session->stop();
+            return;
+        }
     } catch (...) {
         impl_->resume_post_failed.store(
             true, std::memory_order_release);
-        impl_->io_context.stop();
     }
+    finalize_run();
 }
 
 }  // namespace hft
