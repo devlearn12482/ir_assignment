@@ -1,13 +1,20 @@
 #include "hft/command_line.h"
 
 #include "hft/csv_output_set.h"
+#include "hft/live_capture_controller.h"
+#include "hft/live_run_loop.h"
+#include "hft/live_subscription.h"
 #include "hft/market_data_replay.h"
 #include "hft/symbol_identity.h"
 
+#include <boost/asio/io_context.hpp>
+
 #include <array>
 #include <cerrno>
+#include <cstdio>
 #include <cstddef>
 #include <cstdint>
+#include <ctime>
 #include <exception>
 #include <filesystem>
 #include <iostream>
@@ -171,6 +178,282 @@ void report_replay_error(
     std::cerr << '\n';
 }
 
+[[nodiscard]] bool current_utc_date(std::string& output) {
+    const std::time_t now = std::time(nullptr);
+    std::tm utc{};
+    if (now == static_cast<std::time_t>(-1) ||
+        ::gmtime_r(&now, &utc) == nullptr) {
+        return false;
+    }
+    const int year = utc.tm_year + 1900;
+    if (year < 0 || year > 9999) {
+        return false;
+    }
+    std::array<char, 11U> buffer{};
+    const int written = std::snprintf(
+        buffer.data(),
+        buffer.size(),
+        "%04d-%02d-%02d",
+        year,
+        utc.tm_mon + 1,
+        utc.tm_mday);
+    if (written != 10) {
+        return false;
+    }
+    output.assign(buffer.data(), 10U);
+    return true;
+}
+
+void report_live_create_error(
+    const hft::LiveCaptureCreateError& error) {
+    std::cerr << "error category=" << hft::to_string(error.code)
+              << " pipeline_category="
+              << hft::to_string(error.pipeline_error)
+              << " writer_category="
+              << hft::to_string(error.writer_error)
+              << " session_category="
+              << hft::to_string(error.session_error.code)
+              << " session_stage="
+              << hft::to_string(error.session_error.stage)
+              << " native_error="
+              << error.session_error.native_error.value() << '\n';
+}
+
+[[nodiscard]] int live_exit_code(
+    const hft::LiveRunLoopResult& run) noexcept {
+    const hft::LiveCaptureResult& result = run.capture;
+    if (run.error == hft::LiveRunLoopErrorCode::none &&
+        result.success()) {
+        return kExitSuccess;
+    }
+    if (result.error == hft::LiveCaptureErrorCode::writer_failure ||
+        result.writer.output_error) {
+        return kExitOutput;
+    }
+    return kExitProcessing;
+}
+
+void print_live_metrics(
+    const hft::LiveRunLoopResult& run,
+    const int exit_code) {
+    const hft::LiveCaptureResult& capture = run.capture;
+    const hft::CsvWriterMetrics& writer = capture.writer.metrics;
+    std::cerr
+        << "METRICS_BEGIN version=1\n"
+        << "run.mode=live\n"
+        << "run.status="
+        << (exit_code == kExitSuccess ? "success" : "fatal")
+        << "\nrun.exit_code=" << exit_code
+        << "\nrun.stop_requested="
+        << (capture.stop_requested ? 1 : 0)
+        << "\nrun.signals_received=" << run.signals_received
+        << "\nrun.repeated_signals=" << run.repeated_signals
+        << "\nrun.duration_expired="
+        << (run.duration_expired ? 1 : 0)
+        << "\nsource.complete_messages="
+        << capture.metrics.complete_messages
+        << "\nsource.replay_rows_read=0"
+        << "\nsource.text_messages="
+        << capture.metrics.text_messages
+        << "\nconnections.attempts="
+        << capture.metrics.connection_attempts
+        << "\nconnections.successful="
+        << capture.metrics.successful_connections
+        << "\nconnections.reconnects_scheduled="
+        << capture.metrics.reconnects_scheduled
+        << "\nconnections.recoverable_failures="
+        << capture.metrics.recoverable_session_failures
+        << "\nevents.pre_audit_rejections="
+        << capture.metrics.pre_audit_rejections
+        << "\nevents.unknown_stream_rejections="
+        << capture.metrics.unknown_stream_rejections
+        << "\nevents.invalid_data_rejections="
+        << capture.metrics.invalid_data_rejections
+        << "\nevents.malformed_envelope_rejections="
+        << capture.metrics.malformed_envelope_rejections
+        << "\nevents.audit_eligible="
+        << capture.metrics.audit_eligible_events
+        << "\nevents.schema_rejections="
+        << capture.metrics.schema_rejections
+        << "\nevents.applied_refreshes="
+        << capture.metrics.applied_refreshes
+        << "\nevents.applied_diffs="
+        << capture.metrics.applied_diffs
+        << "\nevents.stale_refreshes="
+        << capture.metrics.stale_refreshes
+        << "\nevents.stale_diffs="
+        << capture.metrics.stale_diffs
+        << "\nevents.ignored_while_invalid="
+        << capture.metrics.ignored_while_invalid
+        << "\nevents.sequence_gaps="
+        << capture.metrics.sequence_gaps
+        << "\nevents.crossed_books="
+        << capture.metrics.crossed_books
+        << "\nevents.trades_audited="
+        << capture.metrics.trades_audited
+        << "\nevents.connection_invalidations="
+        << capture.metrics.connection_invalidations
+        << "\nevents.processed="
+        << capture.metrics.processed_events
+        << "\nwriter.audit_rows_enqueued="
+        << writer.audit_rows_published
+        << "\nwriter.audit_rows_written="
+        << writer.audit_rows_written
+        << "\nwriter.audit_rows_unwritten="
+        << writer.audit_rows_unwritten
+        << "\nwriter.book_rows_enqueued="
+        << writer.order_book_rows_published
+        << "\nwriter.book_rows_written="
+        << writer.order_book_rows_written
+        << "\nwriter.book_rows_unwritten="
+        << writer.order_book_rows_unwritten
+        << "\npolicy.binary_messages="
+        << capture.metrics.binary_messages
+        << "\npolicy.oversized_messages="
+        << capture.metrics.oversized_messages
+        << "\npolicy.breaker_trips="
+        << capture.metrics.message_policy_breaker_trips
+        << "\nbackpressure.pauses="
+        << capture.metrics.producer_pauses
+        << "\nbackpressure.resumes="
+        << capture.metrics.producer_resumes
+        << "\nfailure.capture=" << hft::to_string(capture.error)
+        << "\nfailure.control=" << hft::to_string(run.error)
+        << "\nfailure.session="
+        << hft::to_string(capture.session.code)
+        << "\nfailure.writer="
+        << hft::to_string(capture.writer.output_error.code)
+        << "\nMETRICS_END\n";
+}
+
+void print_replay_metrics(
+    const std::size_t files,
+    const std::uint64_t rows_read,
+    const std::uint64_t rows_processed,
+    const std::uint64_t book_rows,
+    const hft::CsvOutputSetMetrics& output,
+    const int exit_code) {
+    const std::uint64_t unwritten_book_rows =
+        book_rows >= output.order_book_rows_written
+            ? book_rows - output.order_book_rows_written
+            : 0U;
+    std::cerr
+        << "METRICS_BEGIN version=1\n"
+        << "run.mode=replay\n"
+        << "run.status="
+        << (exit_code == kExitSuccess ? "success" : "fatal")
+        << "\nrun.exit_code=" << exit_code
+        << "\nrun.stop_requested=0"
+        << "\nsource.complete_messages=0"
+        << "\nsource.replay_files=" << files
+        << "\nsource.replay_rows_read=" << rows_read
+        << "\nconnections.attempts=0"
+        << "\nconnections.successful=0"
+        << "\nconnections.reconnects_scheduled=0"
+        << "\nevents.pre_audit_rejections=0"
+        << "\nevents.audit_eligible=0"
+        << "\nevents.processed=" << rows_processed
+        << "\nwriter.audit_rows_enqueued=0"
+        << "\nwriter.audit_rows_written="
+        << output.audit_rows_written
+        << "\nwriter.audit_rows_unwritten=0"
+        << "\nwriter.book_rows_enqueued=" << book_rows
+        << "\nwriter.book_rows_written="
+        << output.order_book_rows_written
+        << "\nwriter.book_rows_unwritten="
+        << unwritten_book_rows
+        << "\nfailure.replay="
+        << (exit_code == kExitSuccess ? "none" : "failed")
+        << "\nMETRICS_END\n";
+}
+
+[[nodiscard]] int run_live(
+    const hft::CommandLineOptions& options) {
+    std::array<std::string_view, hft::kMaxConfiguredSymbols> symbols{};
+    for (std::size_t index = 0U;
+         index < options.symbols.size();
+         ++index) {
+        symbols[index] = options.symbols[index];
+    }
+    hft::SubscriptionError subscription_error;
+    std::unique_ptr<hft::LiveSubscription> subscription =
+        hft::LiveSubscription::create(
+            options.venue,
+            symbols.data(),
+            options.symbols.size(),
+            subscription_error);
+    if (!subscription) {
+        std::cerr << "error category=subscription_initialization_failed"
+                  << " detail="
+                  << hft::to_string(subscription_error.code)
+                  << '\n';
+        return kExitInternal;
+    }
+    hft::VerifiedWebSocketEndpoint endpoint =
+        hft::production_websocket_endpoint(*subscription);
+
+    std::string utc_date;
+    if (!current_utc_date(utc_date)) {
+        std::cerr << "error category=utc_clock_failure\n";
+        return kExitInternal;
+    }
+    hft::OutputSetOpenError output_error;
+    std::unique_ptr<hft::CsvOutputSet> output =
+        hft::CsvOutputSet::open_live(
+            options.output_directory,
+            options.venue,
+            symbols.data(),
+            options.symbols.size(),
+            utc_date,
+            output_error);
+    if (!output) {
+        report_output_open_error(output_error);
+        return kExitOutput;
+    }
+
+    boost::asio::io_context io_context;
+    hft::LiveRunLoopCreateError loop_error;
+    const std::shared_ptr<hft::LiveRunLoop> loop =
+        hft::LiveRunLoop::create(
+            io_context, options.duration_seconds, loop_error);
+    if (!loop) {
+        std::cerr << "error category=" << hft::to_string(loop_error)
+                  << '\n';
+        return kExitInternal;
+    }
+    hft::LiveCaptureCreateError capture_error;
+    const std::shared_ptr<hft::LiveCaptureController> controller =
+        hft::LiveCaptureController::create(
+            io_context,
+            std::move(subscription),
+            std::move(output),
+            std::move(endpoint),
+            loop->capture_callbacks(),
+            capture_error);
+    if (!controller) {
+        report_live_create_error(capture_error);
+        return capture_error.code ==
+                    hft::LiveCaptureCreateErrorCode::
+                        writer_initialization_failure
+                   ? kExitOutput
+                   : kExitInternal;
+    }
+    if (!loop->attach_controller(controller)) {
+        std::cerr << "error category=live_loop_attach_failed\n";
+        return kExitInternal;
+    }
+
+    loop->start();
+    io_context.run();
+    if (!loop->terminal()) {
+        std::cerr << "error category=live_loop_incomplete\n";
+        return kExitInternal;
+    }
+    const int exit_code = live_exit_code(loop->result());
+    print_live_metrics(loop->result(), exit_code);
+    return exit_code;
+}
+
 [[nodiscard]] int run_replay(
     const hft::CommandLineOptions& options) {
     namespace filesystem = std::filesystem;
@@ -279,6 +562,13 @@ void report_replay_error(
                   << close_error.file_error.native_error << '\n';
         exit_code = kExitOutput;
     }
+    print_replay_metrics(
+        metadata.size(),
+        rows_read,
+        rows_processed,
+        book_rows,
+        output->metrics(),
+        exit_code);
     if (exit_code == kExitSuccess) {
         std::cout << "replay_complete files=" << metadata.size()
                   << " rows_read=" << rows_read
@@ -309,11 +599,7 @@ void report_replay_error(
     }
     if (command_line.options.mode ==
         hft::ApplicationMode::live_capture) {
-        std::cerr
-            << "error category=live_capture_unavailable "
-               "detail=\"live networking is not implemented in this "
-               "increment\"\n";
-        return kExitInternal;
+        return run_live(command_line.options);
     }
     return run_replay(command_line.options);
 }

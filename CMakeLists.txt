@@ -52,6 +52,7 @@ add_library(hft_core STATIC
     src/live_envelope.cpp
     src/live_capture_controller.cpp
     src/live_event_pipeline.cpp
+    src/live_run_loop.cpp
     src/live_subscription.cpp
     src/market_data_replay.cpp
     src/spot_book.cpp

@@ -10,6 +10,7 @@ add_executable(unit_tests
     live_envelope_test.cpp
     live_capture_controller_test.cpp
     live_event_pipeline_test.cpp
+    live_run_loop_test.cpp
     live_subscription_test.cpp
     market_data_replay_test.cpp
     simdjson_contract_test.cpp
@@ -98,6 +99,16 @@ add_test(
         -DBINARY_DIR=${CMAKE_BINARY_DIR}
         -P
         "${CMAKE_CURRENT_SOURCE_DIR}/run_replay_cli_test.cmake"
+)
+
+add_test(
+    NAME live_cli_duration
+    COMMAND
+        "${CMAKE_COMMAND}"
+        -DBINANCE_CAPTURE=$<TARGET_FILE:binance_capture>
+        -DBINARY_DIR=${CMAKE_BINARY_DIR}
+        -P
+        "${CMAKE_CURRENT_SOURCE_DIR}/run_live_cli_duration_test.cmake"
 )
 
 find_program(HFT_SHA256SUM_EXECUTABLE sha256sum)
