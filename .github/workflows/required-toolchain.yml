@@ -97,6 +97,7 @@ jobs:
             -DHFT_WARNINGS_AS_ERRORS=ON
 
           cmake --build build-strict --target tests --parallel
+          cmake --build build-strict --target hft_core_benchmark --parallel
           ./build-strict/tests/unit_tests
 
       - name: Run GCC 12 ASan and UBSan build

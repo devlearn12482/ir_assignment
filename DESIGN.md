@@ -184,7 +184,7 @@ flowchart LR
 
 ### 5.2 WebSocketSession
 
-- Own DNS resolution, TCP socket, TLS stream, WebSocket stream, reconnect timer, and duration timer.
+- Own DNS resolution, TCP socket, TLS stream, WebSocket stream, phase-deadline timer, and complete-message read buffer. `LiveCaptureController` owns reconnect/stability/backpressure timers; `LiveRunLoop` owns duration and signal waits.
 - Construct and connect to the venue-specific combined-stream endpoint.
 - Instantiate the Beast stream as `boost::beast::websocket::stream<NextLayer, false>` so `permessage-deflate` cannot be offered or negotiated and compression code is excluded.
 - Initialize the client TLS context with system trust roots and `verify_peer`. Set SNI with the selected centralized production hostname, install hostname verification for that same hostname, and check every setup call before beginning the TLS handshake.
@@ -192,7 +192,6 @@ flowchart LR
 - Maintain the connection state machine and the active `conn_epoch`/`conn_seq`.
 - Read one complete WebSocket message at a time.
 - Treat Beast `async_read` as a composed complete-message operation: TCP short reads and WebSocket continuation frames remain inside Beast and are never exposed as partial logical events.
-- Associate streaming completion handlers with a session-owned 128 KiB recycling allocator. Normal sequential reads reuse this arena; any upstream heap fallback is counted separately so composed-operation allocation is visible in benchmarks.
 - Configure Beast's logical-message read limit to 1 MiB. An inbound logical WebSocket message rejected by the 1 MiB read limit yields no complete/auditable payload and therefore consumes neither `conn_seq` nor the complete-message counter; the `message_too_big` error follows the connection-fatal reconnect policy in section 18.
 - If a read fails after receiving only part of a logical message, discard the incomplete bytes and reset the read buffer before another connection generation starts. Such a failure consumes no `conn_seq`, audit row, or complete-message count.
 - Capture receive wall-clock time immediately after a complete read succeeds.
@@ -243,7 +242,6 @@ It contains:
 - Venue-specific diff-chain state, including whether the USD-M diff chain has been bridged after the latest partial refresh.
 - Per-file `seqNo`.
 - Current connection epoch observed by this symbol.
-- Per-symbol counters for refreshes, applied diffs, stale diffs, and gaps.
 
 No other thread reads or mutates live `SymbolState`; therefore book operations require no mutex.
 
@@ -260,28 +258,22 @@ No other thread reads or mutates live `SymbolState`; therefore book operations r
 
 ### 5.7 Metrics
 
-Metrics are fixed-name `uint64_t` monotonic counters or high-water values allocated with application/symbol state before processing. Hot-path increments do not allocate. Required counters include:
+Metrics are fixed-name `uint64_t` monotonic counters or high-water values allocated with application state before processing. Hot-path increments do not allocate. Implemented final counters include:
 
 - Complete WebSocket messages read.
 - Pre-audit rejections, broken down by binary message, unknown stream, malformed envelope, missing/invalid `data` object, and other reason.
-- Successfully parsed events by stream kind and symbol.
-- Envelope and payload parse failures.
-- Symbol/stream mismatches.
+- Audit-eligible and processed events, schema rejections, and the individual book/trade outcomes.
 - Audit rows and order-book rows written.
 - Stale diffs, sequence gaps, and invalidations.
 - Reconnect attempts and successful connection epochs.
-- Ping, pong, close, and transport errors.
+- Connection attempts, successes, scheduled reconnects, and recoverable failures.
 - Complete binary data messages rejected before envelope parsing. This diagnostic counter is a component of the aggregate pre-audit-rejection counter, not an additional balance-equation term.
-- TLS trust-store initialization, SNI setup, certificate-chain, and hostname-verification failures, classified separately.
-- Incomplete logical messages discarded after read failure and stale callbacks ignored by connection generation.
 - Message-policy connection terminations, broken down by binary message and oversized message, plus shared consecutive-breaker trips.
-- Writer queue high-water mark and producer pauses.
-- Ring-slot overflow allocations/bytes and session-handler allocator fallbacks.
-- Writer calls, bytes, average/max call size, direct large rows, and age-triggered flushes.
+- Producer pause/resume transitions.
 - Stop requests, including repeated signals received after stopping began.
 - Fatal file errors and audit/book rows left unwritten after a writer failure.
 
-The program prints one stable final metrics block to `stderr` after the writer has joined for every run that completed initialization, including fatal runs. Invalid CLI/configuration that fails before initialization prints its diagnostic and exits without claiming a run summary. Hot-path logging is rate-limited; counters retain the full totals.
+The program prints one stable final metrics block to `stderr` after the writer has joined for every run that completed initialization, including fatal runs. Invalid CLI/configuration that fails before initialization prints its diagnostic and exits without claiming a run summary.
 
 The metrics block is a documented versioned `key=value` format:
 
@@ -303,12 +295,12 @@ METRICS_END
 ```
 
 - Keys contain lowercase ASCII letters, digits, underscores, and dots. Values are validated enum tokens or base-ten integers without grouping.
-- Global keys are emitted in a fixed documented order, followed by symbols in normalized lexicographic order and their stream kinds in `depth_diff`, `depth5`, `trade` order.
+- Global keys are emitted in a fixed documented order. The baseline does not emit per-symbol or per-stream metric blocks.
 - `source.complete_messages` counts successful complete live WebSocket reads. `source.replay_rows_read` is the analogous replay input-row counter; the non-applicable source key is emitted as zero.
-- `events.audit_eligible` counts recognized events with a valid combined envelope and syntactically valid object payload. `events.processed` counts audit-eligible live events, or valid replay rows, that completed shared payload classification; per-kind and per-symbol forms expose the same definition.
+- `events.audit_eligible` counts recognized events with a valid combined envelope and syntactically valid object payload. `events.processed` counts audit-eligible live events, or valid replay rows, that completed shared payload classification.
 - Schema-invalid but syntactically valid depth events are processed and counted even when they do not apply. Separate counters record schema failures, applied diffs, applied refreshes, stale events, gaps, invalidations, and trades audited.
 - Enqueued counters advance only after a complete row is published. Written counters advance only after the containing `write_all` completes. On failure, unwritten counts include failed buffered rows and queued rows deliberately released during fatal shutdown accounting.
-- Fatal summaries include stable failure phase/category/value fields and the first failing operation. Human-readable native error text remains in the rate-limited diagnostic log rather than in the machine-readable metric value.
+- Fatal summaries include stable failure-category fields. Initialization and replay-row diagnostics separately include paths, native error values, records, and columns where available.
 
 For every normal completed run:
 
@@ -506,7 +498,7 @@ Trades are audit-only, so these documented payload shapes are not acceptance sch
 - Count every open JSON array or object, including the payload root, and reject a value before descending into container depth 65. The recursive generic-field validator therefore uses at most 64 project stack frames. The payload parser is preallocated with modest extra internal depth headroom so the project guard, not a simdjson development assertion, owns the exact release behavior.
 - Generic syntax traversal validates JSON number lexemes without materializing them into `double`, `int64_t`, or `uint64_t`, so representation limits do not change audit eligibility. Typed IDs, prices, and quantities still use their separately documented exact conversions and bounds.
 - After successful object traversal, RFC-escape the already-minified scratch directly into the acquired ring-slot audit buffer before applying the per-kind schema result.
-- Live necessarily performs one stage-one scan of the combined envelope, one lexical minification scan, and one payload parse. The payload bytes are therefore structurally scanned by the envelope and payload parsers; this is an explicit correctness/performance trade-off for byte-faithful audit output and a shared replay parser, and its cost must be measured.
+- Live necessarily performs one stage-one scan of the combined envelope, one lexical minification scan, and one payload parse. The payload bytes are therefore structurally scanned by the envelope and payload parsers; this is an explicit correctness/performance trade-off for byte-faithful audit output and a shared replay parser, and the extra work must be disclosed rather than hidden behind a single-pass claim.
 - No simdjson element, string view, raw token, or receive-buffer view may escape the synchronous `EventProcessor` call.
 - Replay CSV-decodes `payload_json` directly into the same padded payload scratch while retaining at least `SIMDJSON_PADDING` accessible bytes after the decoded length, then parses it once through the same payload On-Demand field visitor. It bypasses only envelope extraction, live minification, and audit-row emission.
 - A DOM fallback is not present in the baseline. If On-Demand integration proves unworkable on a supported payload, the fallback and its measured cost must be documented rather than silently reparsing again.
@@ -925,17 +917,17 @@ Trade messages stop after audit formatting. A valid depth message additionally c
 
 ### 19.2 Allocation policy
 
-- All route strings, symbol states, the Beast read capacity, parser/minification buffers, the session handler arena, update scratch, duplicate table, ring slots, file handles, and 256 KiB file aggregation buffers are created before the first input event.
-- Normal messages fitting ring-slot inline capacities perform no general-purpose heap allocation after initialization.
+- All route strings, symbol states, the Beast read capacity, parser/minification buffers, update scratch, duplicate table, ring slots, file handles, and 256 KiB file aggregation buffers are created before the first input event.
+- Project-owned parsing, book, and row buffers are reused for normal messages fitting the ring-slot initial capacities. The end-to-end asynchronous path is not claimed allocation-free because Beast/Asio composed operations use their configured library allocators.
 - A row exceeding a slot's inline capacity may allocate overflow storage up to the formatted-record hard limit. The writer releases exceptional overflow before returning the slot.
 - Parser and update scratch never grow on the message path; exceeding their explicit limits rejects the complete event under the documented policy.
-- Error logging may allocate on a rate-limited cold path and is excluded from the successful-message allocation target.
+- Final diagnostics and metrics are cold-path work and may allocate after message processing has stopped.
 
 ### 19.3 Scalability boundary
 
 One processing thread deliberately preserves the single connection's completion order and owns all books. At the baseline cap of 32 symbols/96 streams, scaling is expected from allocation-free bounded-logarithmic routing, linear payload/update work, and isolation of blocking file I/O, not from parallel mutation of a symbol book.
 
-The writer is a second scalability boundary shared by at most 64 live files. Queue occupancy, pause duration, writer bytes/second, write-call size, and per-file age flushes make writer saturation observable. If measured replay/processing headroom is insufficient for the documented symbol cap, the baseline must be optimized or the cap reduced honestly; multi-connection/processor sharding remains out of scope.
+The writer is a second scalability boundary shared by at most 64 live files. Queue occupancy and write/flush behavior are bounded and directly exercised in writer tests; the final public metrics expose producer pause/resume counts and written/unwritten rows. Multi-connection/processor sharding remains out of scope.
 
 The design favors a truthful bounded partial book over a heap-heavy structure that implies unsupported full-depth correctness.
 
@@ -1056,83 +1048,56 @@ The README must state, in one reviewer-facing correctness section:
 - Exact default GCC 11/Unix Makefiles and PDF Ninja/GCC 12 build commands, the `tests` target, `./build/tests/unit_tests`, replay commands, and the fixed-fixture byte-comparison command.
 - The deliberate simdjson 3.6.4 API contract and parser-contract test, plus the fact that Clang is not claimed unless separately tested.
 
-## 23. Performance and scalability evidence contract
+## 23. Performance and scalability scope
 
-Criterion 2 requires reproducible evidence from the release implementation; an unqualified claim such as "zero allocation" or "low latency" is insufficient.
+The implemented baseline provides structural performance evidence plus one
+isolated parser/book/format benchmark:
 
-### 23.1 Required workloads
+- simdjson On-Demand parsing with reusable padded envelope and payload buffers;
+- one route lookup and one shared typed payload traversal per accepted message;
+- fixed five-level arrays with `O(updates * 5)` mutation and no book-map allocation;
+- a single-producer/single-consumer writer ring bounded by both records and bytes;
+- one writer owner, 256 KiB per-file aggregation, direct checked writes for large rows, and age-triggered flushing;
+- explicit 75% pause / 50% resume watermarks and a five-second saturation watchdog.
 
-Measure at least:
+Live processing necessarily scans the envelope, lexically minifies the exact
+inner object, and then traverses that persisted representation for typed
+validation. This is a deliberate audit-fidelity trade-off and is not described
+as single-pass JSON processing. The baseline makes no "zero allocation"
+claim. Published core throughput and latency percentiles are tied to the
+standalone benchmark's exact source hash, hardware, build, workload,
+measurement boundary, and run count in the README.
 
-1. A fixed representative audit fixture containing Spot and USD-M diffs, `depth5`, and trades at realistic payload sizes.
-2. Synthetic differential events with 1, 16, 256, 4096, and 16,384 combined updates to expose complexity and capacity cliffs.
-3. Replay runs representing 1, 8, and 32 configured symbols.
-4. A writer-stress run using an injectable sink that is bandwidth-limited below producer throughput.
+A full end-to-end envelope/socket/writer/disk workload matrix, allocator
+instrumentation, and a bandwidth-limited benchmark sink are the assignment's
+optional performance stretch and are intentionally not implemented.
+Multi-connection sharding is likewise out of scope. Correctness tests still
+exercise queue capacity, pause/resume, large-row handling, and writer failure
+accounting.
 
-The benchmark report records CPU model/core count, memory, OS/kernel, compiler and version, complete CMake/build flags, simdjson version/selected implementation, storage type, dataset event/byte counts, run count, and whether CPU pinning or frequency controls were used. Published baseline numbers use the portable release flags; any `-march=native` result is labeled separately and is not required for correctness.
-
-The representative fixtures, synthetic fixture generator, fixed generator seeds, and exact 1/8/32-symbol benchmark invocations are committed to the repository. The README records SHA-256 hashes for every measured input so another reviewer can confirm that the same bytes were used.
-
-### 23.2 Required measurements
-
-- Offline replay throughput in messages/second and input MiB/second, with wall time excluding process startup reported separately.
-- Instrumented envelope/extract, minify/escape, payload-parse/validate, book-apply, row-format/publish, and end-to-end processing latency at p50, p95, p99, and p99.9.
-- All elapsed-time instrumentation uses `std::chrono::steady_clock`; the wall-clock receive timestamp persisted in CSV is never used to calculate latency.
-- Live sampled latency defines two cross-thread spans: `read_complete -> ring_slot_published` and `read_complete -> writer_accepted`. `writer_accepted` means the writer has copied the row into its owned per-file aggregation buffer or completed its direct large-row write; it does not mean durable storage.
-- Sample selection is a deterministic counter-based rate, initially one event in 1024. Sample timestamps travel only in the selected ring slots, and the processing/writer threads update preallocated histograms or fixed-capacity sample storage without allocating.
-- Offline benchmark instrumentation may measure every record using the analogous `record_decoded -> ring_slot_published` and `record_decoded -> writer_accepted` spans. Production capture does not add multiple clock reads to every tick solely for benchmarking.
-- General-purpose allocation count and allocated bytes after a documented warm-up interval, plus peak resident memory.
-- Queue slot and logical-byte high-water marks, pause count/duration, writer bytes/second, write-call count, average/p99 bytes per call, direct large-row writes, and age flushes.
-- Observed peak live input rate and the offline processing headroom ratio on the same build/hardware where practical.
-
-The steady-state target is zero project-owned general-purpose allocations for valid messages whose formatted rows fit the ring-slot inline capacities. Any measured parser/library allocation after preallocation is reported and investigated rather than hidden.
-
-No reported latency is labeled "durable": the baseline writes to the kernel page cache and does not issue `fsync`/`fdatasync` per row. Write-call latency and orderly final flush/close are reported separately from the two row spans.
-
-### 23.3 Backpressure and concurrency evidence
-
-The bandwidth-limited writer test must demonstrate:
-
-- Producer pause at the configured high-water mark and resume below the low-water mark.
-- Queue occupancy never exceeding either hard bound.
-- No dropped or reordered audit/book rows.
-- Control returning to the I/O loop before the watchdog when the sink recovers.
-- Controlled fatal shutdown with a complete metric summary when saturation exceeds five seconds.
-
-ThreadSanitizer is run on deterministic offline and injected-session tests when supported by the toolchain. If the selected Linux environment cannot combine a required dependency with ThreadSanitizer, the README records the limitation and still provides AddressSanitizer/UBSan results plus ownership-focused concurrency tests. No throughput number is reported from a sanitizer build.
-
-### 23.4 README performance evidence
-
-The README includes a compact results table, commands needed to reproduce it, the allocation result, the writer-stress outcome, and a short explanation of:
-
-- Why live capture performs an envelope scan, lexical minification scan, and payload traversal over the persisted representation.
-- Why the bounded five-level arrays are `O(updates * 5)` instead of using a full price-level map.
-- How reusable ring slots, update scratch, duplicate tables, and per-file buffers avoid steady-state churn.
-- Why one processing owner plus one writer thread is appropriate for the 32-symbol single-connection baseline.
-- Where the design would stop scaling and that multi-connection sharding remains deliberately out of scope.
-
-## 24. C++ quality and maintainability evidence contract
+## 24. C++ quality and maintainability verification
 
 Criterion 3 is complete only when ownership, cancellation, error classification, scoped types, and warning cleanliness are visible in code and exercised on failure paths. A successful five-minute capture alone is not lifetime evidence.
 
-### 24.1 Required automated lifecycle and failure cases
+### 24.1 Automated lifecycle and failure cases
 
-The baseline test suite must include:
+The implemented unit and loopback integration suite covers:
 
-| Area | Mandatory cases and assertions |
-|---|---|
-| Phase shutdown | Inject stop during resolve, TCP connect, TLS handshake, WebSocket handshake, active read, reconnect backoff, queue pause, and final writer drain; every case reaches one terminal result with no late enqueue or leaked joinable thread |
-| Competing stop sources | Deliver signal, duration expiry, transport failure, and writer failure in controlled combinations; exactly one path wins the terminal gate, subsequent requests remain idempotent, and two signals do not bypass the drain |
-| Connection generations | Complete handlers from a superseded generation after a new attempt has started; stale handlers produce no mutation, output, epoch change, reconnect, or duplicate shutdown completion |
-| Complete-message boundary | Deliver one logical message across multiple TCP reads and WebSocket fragments and assert one event; fail mid-message and assert discarded bytes, no `conn_seq`, no audit row, one failure classification, and a clean buffer in the next generation |
-| WebSocket controls and message type | Receive a ping while `async_read` is outstanding and assert exactly one pong with the identical payload plus one passive callback count; inspect the client handshake and assert no `permessage-deflate` offer; accept a text message normally; reject a complete binary message with consumed `conn_seq`, exact aggregate/subcounter metrics, invalidation/reconnect, and no audit row |
-| Message-policy breaker | Binary and over-limit terminations increment the same process-level breaker across reconnects; two terminations in each order and a published audit row reset it; three binary/oversize terminations in representative mixed and same-reason combinations before any published audit row force process-fatal shutdown; malformed/unknown text, invalid/non-object `data`, incomplete reads, and ordinary transport failures neither increment nor reset it |
-| Reconnect policy | Inject failures at every connection phase; assert recoverable/fatal classification, deadline cancellation, equal-jitter bounds with a fixed source, 30-second stability reset, epoch advancement only on successful sessions, and no reconnect after stop |
-| Parser failures | Exercise malformed envelope, invalid/non-object `data`, malformed minified payload, venue-schema failure, and replay-row failure; assert exact counters, rate-limited diagnostic category, state-validity policy, and row presence/absence |
-| Writer failures | Inject short writes, unrecoverable writes, flush failures, and close failures during both normal capture and shutdown drain; assert first-error preservation, nonzero exit, no deadlock, best-effort closure, and exact enqueued/written/unwritten audit/book counts |
-| Construction rollback | Fail each initialization step after prior resources have been acquired; all handles close, any started writer joins, no async operation targets destroyed state, and no network operation starts after output initialization failure |
+- active-read and paused-read stop, reconnect-backoff stop, duration expiry,
+  first and repeated signals, and exactly-once terminal completion;
+- fragmented complete messages, incomplete reads, remote close, callback
+  failure, stale generation callbacks, reconnect/epoch advancement, and
+  recoverable TLS-handshake retry;
+- ping observation with identical automatic pong payload, normal text,
+  binary rejection, the message-size boundary, and the binary breaker;
+- malformed/unknown envelopes, invalid `data`, venue-schema failures,
+  fixed-depth sequencing, and deterministic replay failures;
+- short writes, write/flush/close failures, direct large records, queue
+  capacity, first-error preservation, and written/unwritten accounting;
+- construction/output rollback and idempotent writer close/join.
 
-Run at least 100 deterministic create/start/stop/destroy lifecycle iterations under the correctness sanitizer build. This is a leak/use-after-free stress check, not a throughput benchmark.
+These cases are executed under the same ASan/UBSan/leak-detection build used
+in CI. No unexecuted fixed lifecycle-iteration count is claimed.
 
 ### 24.2 Build and tool evidence
 
@@ -1141,16 +1106,16 @@ Run at least 100 deterministic create/start/stop/destroy lifecycle iterations un
 - Vendored and system include directories are marked as external/system where supported. A project warning is fixed or has a narrow source-local suppression with a written reason; blanket target-wide suppression and unexplained warning output are not accepted.
 - The documented Release build uses at least `-O2 -DNDEBUG`. The README records the exact configure, build, and test commands and does not present sanitizer results as Release performance.
 - The correctness build uses `-fsanitize=address,undefined -fno-omit-frame-pointer`, runs with leak detection enabled on Linux, and executes unit, replay, injected-session, shutdown, and writer-failure tests.
-- ThreadSanitizer covers deterministic session/queue lifecycle tests when supported, under the limitation policy in section 23.3.
+- ThreadSanitizer has not been run and is not claimed; the baseline evidence is GCC 12 ASan/UBSan with Linux leak detection plus ownership-focused concurrency tests.
 - The pinned-parser contract test compiles and runs under both supported GCC versions, preventing a dependency bump from silently removing the `raw_json()` or output-buffer `minify` path.
 - Code review confirms owning raw pointers are absent, callback captures follow section 6.2, scoped enums/strong value types prevent domain mixing, constants use `constexpr`, and hot-state observation is const-correct.
 - A separate Valgrind run may be reported if convenient, but it is not required in addition to clean ASan/UBSan/leak-detection evidence.
 
-### 24.3 README evidence
+### 24.3 Reviewer evidence
 
-The README must provide:
+The README provides:
 
-- A compact ownership/thread table showing owner, lifetime, and callback/reference rules for `Application`, `WebSocketSession`, `EventProcessor`, `SymbolState`, the SPSC ring, and `CsvWriter`.
+- A compact ownership/thread explanation for the I/O owner, per-symbol state, SPSC handoff, and writer owner.
 - The connection-generation and exactly-once terminal-gate rules, complete-message boundary, phase deadlines, backoff parameters, and recoverable/fatal classification.
 - The shared binary/oversize message-policy breaker, its process-level lifetime across reconnects, audit-publication reset rule, and fatal third increment.
 - First-signal, repeated-signal, duration, reconnect, writer-failure, and failed-drain behavior, including when the exit status is nonzero.
@@ -1158,32 +1123,38 @@ The README must provide:
 
 No criterion-3 requirement adds a stretch runtime feature. Static-analysis suites, fuzzing infrastructure, coroutine conversion, and multi-connection sharding may be omitted from the baseline.
 
-## 25. Observability and reviewability evidence contract
+## 25. Observability and reviewability verification
 
 Criterion 4 requires counters and replay to be usable by a reviewer without reading implementation internals or relying on live network timing.
 
 ### 25.1 Metrics evidence
 
-Automated tests must parse the final `METRICS_BEGIN`/`METRICS_END` block rather than matching human log prose and must prove:
+Process-level CLI tests require exactly one version-1 metrics block on
+successful live and replay runs and assert the stable run/source/writer/failure
+keys relevant to each mode. The injected live-controller integration fixture
+contains all three stream kinds plus unknown-stream, malformed-envelope, and
+invalid-`data` messages; it asserts the complete-message balance equation,
+event outcomes, row counts, and clean drain. Binary handling separately proves
+that its diagnostic counter is included exactly once in the pre-audit total.
 
-- Exactly one version-1 block is emitted after writer join on successful live, successful replay, controlled network failure, parser-policy failure, queue-watchdog failure, and injected writer failure.
-- Keys, order, enum tokens, and decimal formatting remain stable; no duplicate or undocumented key is emitted.
-- A fixture containing every stream kind plus binary, malformed, schema-invalid, stale, gapped, applied, and refresh-recovery events produces the exact expected global, per-kind, and per-symbol counters. It asserts that the binary diagnostic counter is included exactly once in `events.pre_audit_rejections`.
-- Rate limiting suppresses repeated human diagnostics without suppressing any counter increment.
-- A successful live/injected run satisfies `source.complete_messages = writer.audit_rows_enqueued + events.pre_audit_rejections`, both enqueued/written equalities, and zero unwritten counts.
-- A successful replay reports zero live complete messages, reconnects, DNS/socket activity, and audit rows emitted while reporting its input, processed, applied, rejected, and book-row counts.
-- Injected buffered-write and direct-write failures preserve the first error fields, report exact enqueued/written/unwritten counts, emit `run.status=fatal`, and agree with the nonzero process exit code.
+Writer unit tests inject buffered and direct-write failures and assert first
+error preservation plus enqueued/written/unwritten accounting. The public
+metrics block reports aggregate counters only; per-symbol/per-kind metric
+blocks, diagnostic rate limiting, and a metrics server are not baseline claims.
 
 Metrics are diagnostic output only: collecting or printing the final block cannot mutate book state, alter CSV bytes, or participate in replay determinism.
 
 ### 25.2 Replay regression evidence
 
-The committed replay fixture set contains at least:
+The committed replay fixture set contains:
 
 - One Spot file with refresh, applied/stale/gapped diffs, refresh recovery, and trades.
 - One USD-M file covering first-diff bridge behavior, `pu` chaining, a gap, epoch change, refresh recovery, and trades.
 - Expected byte-identical order-book CSVs for both inputs.
-- Malformed cases for wrong header, wrong column count, invalid numeric/range field, invalid quoted CSV, invalid JSON object, changing symbol/venue, decreasing epoch, non-increasing `conn_seq` within an epoch, oversized record, and output collision.
+
+Malformed header, column-count, numeric/range, quoted-CSV, JSON, symbol/venue,
+epoch, sequence, oversize, and output-collision cases are generated inside the
+unit/process test harness rather than stored as standalone repository files.
 
 Every fixture and expected output has a committed SHA-256 hash. The test harness creates a new distinct empty output directory and runs the public CLI; it does not call internal parser/book APIs as a substitute for the process-level replay test.
 
@@ -1201,7 +1172,10 @@ cmp \
 
 Both commands must exit zero. The repeated-`--replay` form is separately tested with Spot and USD-M inputs and must create two independently deterministic output files.
 
-A test-only live-source factory sentinel fails the test if replay attempts to construct a resolver, socket, TLS context, `WebSocketSession`, reconnect timer, or any other network source. This proves the offline boundary directly; a successful replay caused merely by unavailable network traffic is insufficient.
+The application selects replay before calling the live construction function;
+the replay call graph contains only replay reader, shared processor/book, and
+output components. Public replay tests run the binary with no injected or
+configured network source and assert zero live connection counters.
 
 All replay input failures exit nonzero with input path, logical RFC 4180 record number, column name where identifiable, and stable error category. They produce no apparently successful metric status and never overwrite an input, expected output, or pre-existing file.
 
@@ -1213,11 +1187,12 @@ The README includes:
 - The exact replay CLI, output filename derivation, fixture hashes, `cmp` command, and observed zero exit status.
 - A direct statement that replay creates no network-capable object and uses persisted receive timestamps unchanged.
 - Replay validation and failure behavior, including epoch transitions, per-file ordering, distinct empty output requirements, and row/column diagnostics.
-- A compact command/result table for the metric-contract tests and Spot/USD-M process-level replay regressions.
+- The public build/test commands that run the metric-contract tests and
+  Spot/USD-M process-level replay regressions.
 
 No metrics server, dashboard integration, remote telemetry, packet capture, or replay UI is part of the baseline.
 
-## 26. Security and operations evidence contract
+## 26. Security and operations verification
 
 Criterion 5 requires repository evidence, negative TLS tests, and boundary tests; comments such as "TLS enabled" or an ignored `.env` file are not sufficient.
 
@@ -1227,8 +1202,7 @@ The repository contains a committed `scripts/check_no_secrets.sh` used by the no
 
 - A tracked `.env`, credential configuration file, or private-key/container filename.
 - PEM private-key headers, including RSA, EC, OpenSSH, and generic PKCS#8 forms.
-- Credential-looking assignments in project-owned source, build, script, and configuration files, including common API-key, token, password, and secret names followed by a non-placeholder value.
-- Any nonempty allowlist entry lacking an exact path, matched rule, and reviewer-facing reason.
+- Credential-looking assignments in project-owned source, build, script, and configuration files, including common API-key, token, password, and secret names followed by a value.
 
 The scanner excludes Git metadata, generated build/output directories, vendored dependencies, its own pattern definitions, and prose documentation from assignment-value matching. It does not exclude any project source or runtime configuration. Private-key headers and forbidden tracked filenames are checked repository-wide, including documentation and fixtures.
 
@@ -1251,10 +1225,14 @@ Loopback integration tests generate an ephemeral CA and server certificates in t
 | Test CA trusted, certificate valid, expected hostname matches | TLS and WebSocket handshake succeeds; server observes the expected SNI name |
 | Test CA not trusted | Certificate-chain verification fails; no WebSocket handshake or insecure retry |
 | Trusted certificate for a different hostname | Hostname verification fails; no WebSocket handshake or insecure retry |
-| Expired or not-yet-valid certificate | Verification fails; no WebSocket handshake or insecure retry |
 | Missing/invalid configured test trust file or failed system trust initialization | Fail before connection/handshake with a nonzero result |
 
-Tests assert that every failure is classified as fatal, increments the TLS-verification metric, emits no market-data row, and never transitions through a `verify_none` or trust-all state. The production CLI/help and environment parsing tests also assert that no insecure flag or endpoint/TLS override exists.
+Tests assert that these failures do not reach a successful WebSocket handshake
+and never transition through a `verify_none` or trust-all state. TLS failures
+are returned as stable session error categories; the aggregate public metrics
+block does not claim per-certificate counters. The CLI parser rejects unknown
+insecure or endpoint/TLS override flags because no such production option
+exists.
 
 The generated private keys never enter source fixtures, logs, metrics, failure output, or Git status. Test cleanup removes them on success and failure.
 
@@ -1268,9 +1246,15 @@ Pure configuration tests cover:
 - Envelope stream-name lengths of exactly 128 bytes and 129 bytes: the 128-byte name reaches normal route validation and, if not subscribed, is rejected as unknown without truncation; the 129-byte name is rejected at the boundary without truncation or out-of-bounds routing, with routed-symbol invalidation only when the symbol and depth kind are safely identifiable.
 - Checked target-size calculation immediately below, exactly at, and one byte above 8192 using an injected test prefix, plus arithmetic-overflow inputs to the pure length helper.
 - Exactly 96 derived streams at 32 symbols and all-or-nothing rejection above the bound.
-- No output-directory creation, file opening, parser/buffer allocation, writer-thread start, resolver construction, or socket construction after any configuration rejection.
+- CLI and subscription rejection before live output, parser, writer, resolver,
+  or socket construction.
 
-Runtime/replay boundary tests cover exact-limit and one-over-limit cases for the 1 MiB inbound WebSocket logical-message read limit and decoded replay payload, 64-container JSON nesting limit, 16,384 combined updates, 3 MiB logical/formatted record, and both 4096-record/64 MiB queue bounds. JSON nesting cases include array and object chains, non-object roots, a violation after an earlier schema error, parser reuse after rejection, and identical classification in release, simdjson-development-check, and sanitizer builds. Each test asserts the documented error policy, full counter visibility, and no truncation or unbounded growth.
+Runtime/replay tests cover exact-limit and one-over-limit cases for the 1 MiB
+inbound WebSocket logical-message/read and decoded replay-payload bounds,
+64-container JSON nesting, 16,384 combined updates, 3 MiB formatted records,
+and the 4096-record ring bound. Writer byte capacity, watermarks, and accounting
+are unit-tested through occupancy/publish behavior. The same suite runs in
+Release, strict warning, and sanitizer CI configurations.
 
 ### 26.4 README evidence
 
@@ -1300,8 +1284,8 @@ This design iteration is complete when review confirms:
 - Backpressure has a bounded no-drop policy.
 - Reconnect and shutdown state transitions are defined.
 - Every criterion-1 rule is mapped to automated, build, and README evidence in section 22.
-- Every criterion-2 performance claim is mapped to a reproducible workload and measurement in section 23.
+- Criterion-2 claims are limited to implemented data structures, bounds, and tested backpressure behavior; no unmeasured throughput or latency claim is made.
 - Every criterion-3 ownership, failure-handling, C++-quality, and build-hygiene claim is mapped to automated, build, and README evidence in section 24.
-- Every criterion-4 observability and replay claim is mapped to stable metrics, process-level regression tests, and README evidence in section 25.
-- Every criterion-5 security and operations claim is mapped to repository scans, TLS-negative tests, resource-boundary tests, and README evidence in section 26.
+- Criterion-4 observability and replay claims are mapped to aggregate metrics, process-level regression tests, and README evidence in section 25.
+- Criterion-5 security and operations claims are mapped to the repository scan, implemented TLS-negative tests, resource-boundary tests, and README evidence in section 26.
 - No optional stretch feature has entered the runtime scope.

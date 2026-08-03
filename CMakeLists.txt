@@ -102,6 +102,17 @@ add_executable(binance_capture src/main.cpp)
 target_link_libraries(binance_capture PRIVATE hft_core simdjson::simdjson)
 hft_enable_project_warnings(binance_capture)
 
+add_executable(
+    hft_core_benchmark
+    EXCLUDE_FROM_ALL
+    benchmarks/core_benchmark.cpp
+)
+target_link_libraries(
+    hft_core_benchmark
+    PRIVATE hft_core simdjson::simdjson
+)
+hft_enable_project_warnings(hft_core_benchmark)
+
 include(CTest)
 
 if(BUILD_TESTING)

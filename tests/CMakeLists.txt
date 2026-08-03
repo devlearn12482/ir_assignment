@@ -67,6 +67,16 @@ endforeach()
 
 add_test(NAME unit_tests COMMAND unit_tests)
 
+find_program(HFT_BASH_EXECUTABLE bash)
+if(HFT_BASH_EXECUTABLE)
+    add_test(
+        NAME repository_secret_scan
+        COMMAND
+            "${HFT_BASH_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/scripts/check_no_secrets.sh"
+    )
+endif()
+
 find_program(HFT_OPENSSL_EXECUTABLE openssl REQUIRED)
 add_test(
     NAME verified_tls_websocket
