@@ -238,6 +238,12 @@ void print_live_metrics(
     const int exit_code) {
     const hft::LiveCaptureResult& capture = run.capture;
     const hft::CsvWriterMetrics& writer = capture.writer.metrics;
+    const hft::WebSocketSessionErrorCode reported_session_error =
+        exit_code == kExitSuccess &&
+                capture.session.code ==
+                    hft::WebSocketSessionErrorCode::cancelled
+            ? hft::WebSocketSessionErrorCode::none
+            : capture.session.code;
     std::cerr
         << "METRICS_BEGIN version=1\n"
         << "run.mode=live\n"
@@ -320,7 +326,7 @@ void print_live_metrics(
         << "\nfailure.capture=" << hft::to_string(capture.error)
         << "\nfailure.control=" << hft::to_string(run.error)
         << "\nfailure.session="
-        << hft::to_string(capture.session.code)
+        << hft::to_string(reported_session_error)
         << "\nfailure.writer="
         << hft::to_string(capture.writer.output_error.code)
         << "\nMETRICS_END\n";
