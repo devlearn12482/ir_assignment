@@ -32,6 +32,22 @@ if(NOT replay_output MATCHES
    "replay_complete files=2 rows_read=[0-9]+ rows_processed=[0-9]+ order_book_rows=[0-9]+")
     message(FATAL_ERROR "success summary is missing or unstable: ${replay_output}")
 endif()
+string(REGEX MATCHALL "METRICS_BEGIN version=1" replay_metrics_begin
+    "${replay_error}")
+string(REGEX MATCHALL "METRICS_END" replay_metrics_end
+    "${replay_error}")
+list(LENGTH replay_metrics_begin replay_metrics_begin_count)
+list(LENGTH replay_metrics_end replay_metrics_end_count)
+if(NOT replay_metrics_begin_count EQUAL 1 OR
+   NOT replay_metrics_end_count EQUAL 1 OR
+   NOT replay_error MATCHES "run.mode=replay" OR
+   NOT replay_error MATCHES "run.status=success" OR
+   NOT replay_error MATCHES "connections.attempts=0" OR
+   NOT replay_error MATCHES "writer.audit_rows_written=0" OR
+   NOT replay_error MATCHES "writer.book_rows_unwritten=0")
+    message(FATAL_ERROR
+        "replay metrics block is missing or inconsistent: ${replay_error}")
+endif()
 
 foreach(stem
     market_data_spot_BTCUSDT_fixture

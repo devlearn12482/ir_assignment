@@ -4,6 +4,7 @@
 
 #include <array>
 #include <charconv>
+#include <chrono>
 #include <new>
 #include <system_error>
 
@@ -91,6 +92,17 @@ namespace {
            parsed.ptr == value.data() + value.size() && output != 0U;
 }
 
+[[nodiscard]] bool valid_live_duration(
+    const std::uint64_t seconds) noexcept {
+    const auto maximum_seconds =
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::duration::max())
+            .count();
+    return maximum_seconds > 0 &&
+           seconds <=
+               static_cast<std::uint64_t>(maximum_seconds);
+}
+
 CommandLineParseResult parse_command_line_impl(
     const int argc,
     const char* const* const argv) {
@@ -171,7 +183,8 @@ CommandLineParseResult parse_command_line_impl(
                 return result;
             }
             std::uint64_t duration = 0;
-            if (!parse_positive_integer(value, duration)) {
+            if (!parse_positive_integer(value, duration) ||
+                !valid_live_duration(duration)) {
                 result.error = CommandLineErrorCode::invalid_duration;
                 result.argument_index = static_cast<std::size_t>(index);
                 return result;

@@ -15,6 +15,7 @@ int main() {
     hft::test::run_live_envelope_tests(context);
     hft::test::run_live_capture_controller_tests(context);
     hft::test::run_live_event_pipeline_tests(context);
+    hft::test::run_live_run_loop_tests(context);
     hft::test::run_live_subscription_tests(context);
     hft::test::run_market_data_replay_tests(context);
     hft::test::run_spot_payload_parser_tests(context);

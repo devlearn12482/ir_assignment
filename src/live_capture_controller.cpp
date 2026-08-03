@@ -18,6 +18,74 @@ namespace {
 constexpr auto kBackpressureTimeout = std::chrono::seconds{5};
 constexpr std::uint64_t kMessagePolicyBreakerLimit = 3U;
 
+void record_event_status(
+    LiveCaptureMetrics& metrics,
+    const EventProcessStatus status) noexcept {
+    switch (status) {
+        case EventProcessStatus::applied_refresh:
+            ++metrics.applied_refreshes;
+            break;
+        case EventProcessStatus::applied_diff:
+            ++metrics.applied_diffs;
+            break;
+        case EventProcessStatus::stale_refresh:
+            ++metrics.stale_refreshes;
+            break;
+        case EventProcessStatus::stale_diff:
+            ++metrics.stale_diffs;
+            break;
+        case EventProcessStatus::ignored_while_invalid:
+            ++metrics.ignored_while_invalid;
+            break;
+        case EventProcessStatus::sequence_gap:
+            ++metrics.sequence_gaps;
+            break;
+        case EventProcessStatus::crossed_book:
+            ++metrics.crossed_books;
+            break;
+        case EventProcessStatus::trade_audited:
+            ++metrics.trades_audited;
+            break;
+        case EventProcessStatus::schema_rejected:
+            ++metrics.schema_rejections;
+            break;
+        case EventProcessStatus::not_processed:
+        case EventProcessStatus::pre_audit_rejected:
+            break;
+    }
+}
+
+void record_envelope_rejection(
+    LiveCaptureMetrics& metrics,
+    const LiveEnvelopeErrorCode error) noexcept {
+    if (error == LiveEnvelopeErrorCode::unknown_stream) {
+        ++metrics.unknown_stream_rejections;
+        return;
+    }
+    switch (error) {
+        case LiveEnvelopeErrorCode::missing_data:
+        case LiveEnvelopeErrorCode::duplicate_data:
+        case LiveEnvelopeErrorCode::data_not_object:
+        case LiveEnvelopeErrorCode::payload_minify_failed:
+            ++metrics.invalid_data_rejections;
+            return;
+        case LiveEnvelopeErrorCode::none:
+        case LiveEnvelopeErrorCode::unknown_stream:
+            return;
+        case LiveEnvelopeErrorCode::invalid_input_buffer:
+        case LiveEnvelopeErrorCode::message_too_large:
+        case LiveEnvelopeErrorCode::json_nesting_too_deep:
+        case LiveEnvelopeErrorCode::malformed_json:
+        case LiveEnvelopeErrorCode::root_not_object:
+        case LiveEnvelopeErrorCode::missing_stream:
+        case LiveEnvelopeErrorCode::duplicate_stream:
+        case LiveEnvelopeErrorCode::stream_wrong_type:
+        case LiveEnvelopeErrorCode::stream_name_too_long:
+            ++metrics.malformed_envelope_rejections;
+            return;
+    }
+}
+
 [[nodiscard]] bool valid_reconnect_options(
     const LiveReconnectOptions& options) noexcept {
     return options.initial_backoff.count() > 0 &&
@@ -492,11 +560,20 @@ void LiveCaptureController::on_text_message(
         if (pipeline_result.disposition ==
             LivePipelineDisposition::pre_audit_rejected) {
             ++impl_->result.metrics.pre_audit_rejections;
+            record_envelope_rejection(
+                impl_->result.metrics,
+                pipeline_result.envelope_error);
             return;
         }
         fail(LiveCaptureErrorCode::pipeline_failure);
         return;
     }
+
+    ++impl_->result.metrics.audit_eligible_events;
+    ++impl_->result.metrics.processed_events;
+    record_event_status(
+        impl_->result.metrics,
+        pipeline_result.event.status);
 
     const CsvWriterPublishError publish_error =
         impl_->writer->publish(pipeline_result.target_index);
@@ -548,6 +625,9 @@ void LiveCaptureController::on_session_terminal(
     impl_->reads_paused = false;
     impl_->session_open = false;
     impl_->pipeline->invalidate_all();
+    impl_->result.metrics.connection_invalidations +=
+        static_cast<std::uint64_t>(
+            impl_->subscription->symbol_count());
     impl_->result.session = session_result;
     impl_->session.reset();
 

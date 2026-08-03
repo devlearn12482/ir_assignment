@@ -1,5 +1,6 @@
 #include "hft/csv_output_set.h"
 #include "hft/live_capture_controller.h"
+#include "hft/live_run_loop.h"
 #include "hft/live_subscription.h"
 #include "hft/spot_payload_parser.h"
 #include "hft/verified_websocket_session.h"
@@ -19,6 +20,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -27,6 +29,7 @@
 #include <iostream>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -62,6 +65,9 @@ enum class Scenario : std::uint8_t {
     live_controller_stop_backoff,
     live_controller_binary_breaker,
     live_controller_tls_retry,
+    live_run_loop_duration,
+    live_run_loop_signal,
+    live_run_loop_repeated_signals,
 };
 
 struct ServerOutcome {
@@ -96,6 +102,9 @@ struct ControllerOutcome {
     bool controller_released{false};
     hft::LiveCaptureCreateError create_error{};
     hft::LiveCaptureResult terminal{};
+    std::uint64_t signals_received{0U};
+    std::uint64_t repeated_signals{0U};
+    bool duration_expired{false};
     std::string audit_bytes{};
     std::string book_bytes{};
 };
@@ -458,12 +467,18 @@ void run_server(
                 }
                 wait_for_peer_close(stream, outcome);
                 return;
-            case Scenario::live_controller: {
-                constexpr std::array<std::string_view, 3U>
+            case Scenario::live_controller:
+            case Scenario::live_run_loop_duration:
+            case Scenario::live_run_loop_signal:
+            case Scenario::live_run_loop_repeated_signals: {
+                constexpr std::array<std::string_view, 6U>
                     messages{{
                         R"({"stream":"btcusdt@depth5@100ms","data":{"lastUpdateId":100,"bids":[["100","1"]],"asks":[["101","2"]]}})",
                         R"({"stream":"btcusdt@depth@100ms","data":{"e":"depthUpdate","E":2,"s":"BTCUSDT","U":101,"u":101,"b":[["100","3"]],"a":[]}})",
                         R"({"stream":"btcusdt@trade","data":{"e":"trade","s":"BTCUSDT","p":"100","q":"1"}})",
+                        R"({"stream":"xrpusdt@trade","data":{"e":"trade","s":"XRPUSDT","p":"1","q":"1"}})",
+                        R"({"stream":)",
+                        R"({"stream":"btcusdt@trade","data":[]})",
                     }};
                 stream.text(true);
                 for (const std::string_view message : messages) {
@@ -548,12 +563,34 @@ ControllerOutcome run_controller_client(
     const std::string book_path{
         output->order_book_path(0U)};
 
+    const bool managed_run_loop =
+        scenario == Scenario::live_run_loop_duration ||
+        scenario == Scenario::live_run_loop_signal ||
+        scenario == Scenario::live_run_loop_repeated_signals;
+    hft::LiveRunLoopCreateError loop_error;
+    std::shared_ptr<hft::LiveRunLoop> run_loop;
     hft::LiveCaptureCallbacks callbacks;
-    callbacks.on_terminal =
-        [&](const hft::LiveCaptureResult& result) {
-            outcome.terminal_called = true;
-            outcome.terminal = result;
-        };
+    if (managed_run_loop) {
+        run_loop = hft::LiveRunLoop::create(
+            io_context,
+            scenario == Scenario::live_run_loop_duration
+                ? std::optional<std::uint64_t>{1U}
+                : std::nullopt,
+            loop_error);
+        if (!run_loop) {
+            outcome.create_error.code =
+                hft::LiveCaptureCreateErrorCode::
+                    allocation_failure;
+            return outcome;
+        }
+        callbacks = run_loop->capture_callbacks();
+    } else {
+        callbacks.on_terminal =
+            [&](const hft::LiveCaptureResult& result) {
+                outcome.terminal_called = true;
+                outcome.terminal = result;
+            };
+    }
     hft::LiveReconnectOptions reconnect_options;
     reconnect_options.initial_backoff =
         scenario ==
@@ -596,31 +633,65 @@ ControllerOutcome run_controller_client(
         weak_controller{controller};
 
     asio::steady_timer stop_timer{io_context};
-    stop_timer.expires_after(
-        scenario ==
-                Scenario::live_controller_reconnect ||
+    if (managed_run_loop) {
+        if (!run_loop->attach_controller(controller)) {
+            return outcome;
+        }
+        if (scenario == Scenario::live_run_loop_signal ||
             scenario ==
-                Scenario::live_controller_stop_backoff ||
+                Scenario::live_run_loop_repeated_signals) {
+            stop_timer.expires_after(
+                std::chrono::milliseconds{100});
+            stop_timer.async_wait(
+                [scenario](
+                    const boost::system::error_code& error) {
+                    if (!error) {
+                        static_cast<void>(std::raise(SIGINT));
+                        if (scenario == Scenario::
+                                            live_run_loop_repeated_signals) {
+                            static_cast<void>(std::raise(SIGTERM));
+                        }
+                    }
+                });
+        }
+        run_loop->start();
+    } else {
+        stop_timer.expires_after(
             scenario ==
-                Scenario::live_controller_tls_retry
-            ? std::chrono::milliseconds{300}
-            : (scenario ==
-                       Scenario::live_controller_binary_breaker
-                   ? std::chrono::milliseconds{500}
-                   : std::chrono::seconds{1}));
-    stop_timer.async_wait(
-        [weak_controller](
-            const boost::system::error_code& error) {
-            if (!error) {
-                if (const auto owner =
-                        weak_controller.lock()) {
-                    owner->stop();
+                    Scenario::live_controller_reconnect ||
+                scenario ==
+                    Scenario::live_controller_stop_backoff ||
+                scenario ==
+                    Scenario::live_controller_tls_retry
+                ? std::chrono::milliseconds{300}
+                : (scenario ==
+                           Scenario::live_controller_binary_breaker
+                       ? std::chrono::milliseconds{500}
+                       : std::chrono::seconds{1}));
+        stop_timer.async_wait(
+            [weak_controller](
+                const boost::system::error_code& error) {
+                if (!error) {
+                    if (const auto owner =
+                            weak_controller.lock()) {
+                        owner->stop();
+                    }
                 }
-            }
-        });
-    controller->start();
+            });
+        controller->start();
+    }
     controller.reset();
     io_context.run();
+    if (managed_run_loop && run_loop->terminal()) {
+        outcome.terminal_called = true;
+        outcome.terminal = run_loop->result().capture;
+        outcome.signals_received =
+            run_loop->result().signals_received;
+        outcome.repeated_signals =
+            run_loop->result().repeated_signals;
+        outcome.duration_expired =
+            run_loop->result().duration_expired;
+    }
     outcome.controller_released = weak_controller.expired();
     if (outcome.terminal_called) {
         outcome.audit_bytes = read_binary_file(audit_path);
@@ -817,7 +888,10 @@ bool run_case(
         scenario ==
             Scenario::live_controller_binary_breaker ||
         scenario ==
-            Scenario::live_controller_tls_retry) {
+            Scenario::live_controller_tls_retry ||
+        scenario == Scenario::live_run_loop_duration ||
+        scenario == Scenario::live_run_loop_signal ||
+        scenario == Scenario::live_run_loop_repeated_signals) {
         controller_outcome =
             run_controller_client(port, ca_file, scenario);
     } else {
@@ -846,6 +920,9 @@ bool run_case(
             Scenario::live_controller_binary_breaker &&
         scenario !=
             Scenario::live_controller_tls_retry &&
+        scenario != Scenario::live_run_loop_duration &&
+        scenario != Scenario::live_run_loop_signal &&
+        scenario != Scenario::live_run_loop_repeated_signals &&
         !client_outcome.opened) {
         fail("client did not reach open state");
     }
@@ -857,6 +934,9 @@ bool run_case(
             Scenario::live_controller_binary_breaker &&
         scenario !=
             Scenario::live_controller_tls_retry &&
+        scenario != Scenario::live_run_loop_duration &&
+        scenario != Scenario::live_run_loop_signal &&
+        scenario != Scenario::live_run_loop_repeated_signals &&
         !client_outcome.terminal_called) {
         fail("terminal callback was not called");
     }
@@ -1012,15 +1092,41 @@ bool run_case(
                 break;
             }
             if (controller_outcome.terminal.metrics.
-                        text_messages != 3U ||
+                        text_messages != 6U ||
+                controller_outcome.terminal.metrics.
+                        complete_messages != 6U ||
                 controller_outcome.terminal.metrics.
                         batches_published != 3U ||
+                controller_outcome.terminal.metrics.
+                        audit_eligible_events != 3U ||
+                controller_outcome.terminal.metrics.
+                        processed_events != 3U ||
+                controller_outcome.terminal.metrics.
+                        pre_audit_rejections != 3U ||
+                controller_outcome.terminal.metrics.
+                        unknown_stream_rejections != 1U ||
+                controller_outcome.terminal.metrics.
+                        invalid_data_rejections != 1U ||
+                controller_outcome.terminal.metrics.
+                        malformed_envelope_rejections != 1U ||
+                controller_outcome.terminal.metrics.
+                        applied_refreshes != 1U ||
+                controller_outcome.terminal.metrics.
+                        applied_diffs != 1U ||
+                controller_outcome.terminal.metrics.
+                        trades_audited != 1U ||
                 controller_outcome.terminal.writer.metrics.
                         audit_rows_written != 3U ||
                 controller_outcome.terminal.writer.metrics.
                         order_book_rows_written != 2U ||
                 controller_outcome.terminal.session.
-                        last_connection_sequence != 3U) {
+                        last_connection_sequence != 6U ||
+                controller_outcome.terminal.metrics.
+                            complete_messages !=
+                        controller_outcome.terminal.writer.metrics.
+                                audit_rows_published +
+                            controller_outcome.terminal.metrics.
+                                pre_audit_rejections) {
                 fail("controller accounting is inconsistent");
             }
             if (static_cast<std::size_t>(std::count(
@@ -1193,6 +1299,38 @@ bool run_case(
                 fail("failed TLS attempt consumed epoch or sequence");
             }
             break;
+        case Scenario::live_run_loop_duration:
+        case Scenario::live_run_loop_signal:
+        case Scenario::live_run_loop_repeated_signals: {
+            const bool duration_case =
+                scenario == Scenario::live_run_loop_duration;
+            const bool repeated_signal_case =
+                scenario ==
+                Scenario::live_run_loop_repeated_signals;
+            if (!controller_outcome.created ||
+                controller_outcome.create_error ||
+                !controller_outcome.terminal_called ||
+                !controller_outcome.controller_released ||
+                !controller_outcome.terminal.success()) {
+                fail("managed run loop did not stop and drain cleanly");
+                break;
+            }
+            if (controller_outcome.duration_expired !=
+                    duration_case ||
+                controller_outcome.signals_received !=
+                    (duration_case
+                         ? 0U
+                         : (repeated_signal_case ? 2U : 1U)) ||
+                controller_outcome.repeated_signals !=
+                    (repeated_signal_case ? 1U : 0U) ||
+                controller_outcome.terminal.writer.metrics.
+                        audit_rows_written != 3U ||
+                controller_outcome.terminal.writer.metrics.
+                        order_book_rows_written != 2U) {
+                fail("managed stop reason or drain metrics are wrong");
+            }
+            break;
+        }
     }
     return success;
 }
@@ -1251,6 +1389,15 @@ int main(const int argc, const char* const* const argv) {
     run(
         Scenario::live_controller_tls_retry,
         "live-controller-tls-retry");
+    run(
+        Scenario::live_run_loop_duration,
+        "live-run-loop-duration");
+    run(
+        Scenario::live_run_loop_signal,
+        "live-run-loop-signal");
+    run(
+        Scenario::live_run_loop_repeated_signals,
+        "live-run-loop-repeated-signals");
     if (success) {
         std::cout
             << "PASS: bounded WebSocket read loop integration\n";

@@ -90,6 +90,19 @@ void test_live_mode(Context& context) {
             CommandLineErrorCode::invalid_duration,
         "zero duration is rejected");
 
+    constexpr std::array<const char*, 7U> excessive_duration{
+        "binance_capture",
+        "--venue",
+        "spot",
+        "--symbols",
+        "BTCUSDT",
+        "--duration",
+        "18446744073709551615"};
+    context.expect(
+        parse(excessive_duration).error ==
+            CommandLineErrorCode::invalid_duration,
+        "duration exceeding the steady timer range is rejected");
+
     constexpr std::array<const char*, 5U> invalid_symbol{
         "binance_capture",
         "--venue",
