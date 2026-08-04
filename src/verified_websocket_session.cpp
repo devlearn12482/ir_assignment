@@ -682,14 +682,6 @@ struct VerifiedWebSocketSession::Impl {
                 asio::error::operation_aborted});
             return;
         }
-        if (read_in_progress) {
-            finish(WebSocketSessionResult{
-                WebSocketSessionErrorCode::cancelled,
-                WebSocketSessionStage::read,
-                asio::error::operation_aborted});
-            return;
-        }
-
         state = State::closing;
         arm_deadline(
             kCloseTimeout,
