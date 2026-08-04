@@ -339,22 +339,16 @@ void test_metadata_and_epoch_contract(Context& context) {
         R"({"stream":"btcusdt@depth5@100ms","data":{"lastUpdateId":100,"bids":[["100","1"]],"asks":[["101","2"]]}})";
 
     LivePipelineResult result = pipeline->process(
-        message(1U, 1U, refresh), batch);
-    context.expect(
-        result.fatal() &&
-            result.error ==
-                LivePipelineErrorCode::invalid_message_metadata,
-        "first live epoch must be zero");
-
-    result = pipeline->process(
-        message(0U, 2U, refresh), batch);
+        message(1U, 2U, refresh), batch);
     context.expect(
         result.has_batch() &&
-            pipeline->state(0U)->book_valid(),
-        "first text may follow an earlier binary sequence");
+            pipeline->state(0U)->book_valid() &&
+            pipeline->state(0U)->current_connection_epoch() == 1U &&
+            pipeline->state(0U)->last_connection_sequence() == 2U,
+        "first observed text may follow an earlier session and sequence");
 
     result = pipeline->process(
-        message(0U, 2U, refresh), batch);
+        message(1U, 2U, refresh), batch);
     context.expect(
         result.fatal() &&
             result.error ==
@@ -374,7 +368,7 @@ void test_metadata_and_epoch_contract(Context& context) {
         "new epoch invalidates all books before audit-only trade");
 
     result = pipeline->process(
-        message(1U, 2U, trade), batch);
+        message(1U, 3U, trade), batch);
     context.expect(
         result.fatal() &&
             result.error ==
