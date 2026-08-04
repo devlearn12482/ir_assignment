@@ -150,6 +150,8 @@ public:
     // These methods are safe to call from outside the I/O thread. Every
     // transition and user callback is serialized through io_context.
     void start();
+    // Once open, stop() initiates the normal WebSocket close handshake even
+    // when one complete-message read is outstanding.
     void stop();
     // pause_reads() never cancels an already-started complete-message read.
     // When invoked synchronously from on_text_message it prevents the next

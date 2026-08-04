@@ -441,8 +441,7 @@ void run_server(
                 }
                 return;
             case Scenario::active_read_stop: {
-                beast::flat_buffer buffer;
-                stream.read(buffer, error);
+                wait_for_peer_close(stream, outcome);
                 return;
             }
             case Scenario::text_callback_failure:
@@ -1040,14 +1039,11 @@ bool run_case(
             }
             break;
         case Scenario::active_read_stop:
-            if (client_outcome.text_messages != 0U ||
-                client_outcome.terminal.code !=
-                    hft::WebSocketSessionErrorCode::cancelled ||
-                client_outcome.terminal.stage !=
-                    hft::WebSocketSessionStage::read ||
+            if (!client_outcome.terminal.success() ||
+                client_outcome.text_messages != 0U ||
                 client_outcome.terminal.
                         last_connection_sequence != 0U) {
-                fail("active read did not cancel deterministically");
+                fail("active read stop did not close cleanly");
             }
             break;
         case Scenario::text_callback_failure:
