@@ -205,6 +205,7 @@ private:
         std::uint64_t generation,
         const boost::system::error_code& error) noexcept;
     void request_stop_on_io() noexcept;
+    void handle_session_stop_exception() noexcept;
     void finalize_run() noexcept;
     void pause_for_backpressure();
     void post_resume_from_writer() noexcept;

@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -20,6 +21,11 @@ struct LiveCaptureControllerTestAccess {
         const std::uint64_t generation,
         const WebSocketSessionResult result) noexcept {
         controller.on_session_terminal(generation, result);
+    }
+
+    static void on_session_stop_exception(
+        LiveCaptureController& controller) noexcept {
+        controller.handle_session_stop_exception();
     }
 };
 
@@ -123,11 +129,14 @@ void test_invalid_reconnect_policy_is_rejected(
         "controller rejects a zero reconnect delay");
 }
 
-void test_stop_terminal_arbitration(Context& context) {
+void test_stop_terminal_policy(Context& context) {
     const auto run_case = [&](
-                              const WebSocketSessionErrorCode session_code,
+                              const std::optional<
+                                  WebSocketSessionErrorCode> session_code,
                               const bool expect_success,
                               const std::uint64_t expected_recoverable_failures,
+                              const std::uint64_t expected_invalidations,
+                              const LiveCaptureErrorCode expected_error,
                               const std::string_view label) {
         constexpr std::array<std::string_view, 1U> symbols{
             "BTCUSDT"};
@@ -179,31 +188,37 @@ void test_stop_terminal_arbitration(Context& context) {
         }
 
         controller->stop();
-        LiveCaptureControllerTestAccess::on_session_terminal(
-            *controller,
-            1U,
-            WebSocketSessionResult{
-                session_code,
-                WebSocketSessionStage::read,
-                {},
-                7U});
+        if (session_code) {
+            LiveCaptureControllerTestAccess::on_session_terminal(
+                *controller,
+                1U,
+                WebSocketSessionResult{
+                    *session_code,
+                    WebSocketSessionStage::read,
+                    {},
+                    7U});
+        } else {
+            LiveCaptureControllerTestAccess::
+                on_session_stop_exception(*controller);
+        }
         io_context.run();
 
         const LiveCaptureResult& result = controller->result();
         context.expect(
             controller->terminal() && terminal_calls == 1U &&
                 result.stop_requested &&
-                result.session.code == session_code &&
-                result.session.last_connection_sequence == 7U &&
-                result.metrics.connection_invalidations == 1U &&
+                result.session.code ==
+                    session_code.value_or(
+                        WebSocketSessionErrorCode::none) &&
+                result.session.last_connection_sequence ==
+                    (session_code ? 7U : 0U) &&
+                result.metrics.connection_invalidations ==
+                    expected_invalidations &&
                 result.metrics.recoverable_session_failures ==
                     expected_recoverable_failures &&
                 result.metrics.reconnects_scheduled == 0U &&
                 result.success() == expect_success &&
-                result.error ==
-                    (expect_success
-                         ? LiveCaptureErrorCode::none
-                         : LiveCaptureErrorCode::session_failure),
+                result.error == expected_error,
             label);
     };
 
@@ -211,12 +226,23 @@ void test_stop_terminal_arbitration(Context& context) {
         WebSocketSessionErrorCode::remote_close,
         true,
         1U,
+        1U,
+        LiveCaptureErrorCode::none,
         "queued recoverable terminal result loses to stop intent");
     run_case(
         WebSocketSessionErrorCode::tls_verification_failure,
         false,
         0U,
+        1U,
+        LiveCaptureErrorCode::session_failure,
         "stop intent does not mask a non-recoverable session failure");
+    run_case(
+        std::nullopt,
+        false,
+        0U,
+        0U,
+        LiveCaptureErrorCode::session_failure,
+        "session stop exception is classified as a session failure");
 }
 
 }  // namespace
@@ -224,7 +250,7 @@ void test_stop_terminal_arbitration(Context& context) {
 void run_live_capture_controller_tests(Context& context) {
     test_output_venue_must_match_subscription(context);
     test_invalid_reconnect_policy_is_rejected(context);
-    test_stop_terminal_arbitration(context);
+    test_stop_terminal_policy(context);
 }
 
 }  // namespace hft::test
