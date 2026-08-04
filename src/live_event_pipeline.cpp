@@ -45,7 +45,10 @@ struct LiveEventPipeline::Impl {
             return false;
         }
         if (!has_connection_metadata) {
-            return message.connection_epoch == 0U;
+            // The controller owns epoch assignment. Earlier successful
+            // sessions may disconnect before delivering a text message, so
+            // the pipeline's first observed epoch need not be zero.
+            return true;
         }
         if (message.connection_epoch < connection_epoch) {
             return false;
