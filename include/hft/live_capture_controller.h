@@ -161,6 +161,9 @@ public:
     ~LiveCaptureController() noexcept;
 
     void start();
+    // Stop intent is published before its I/O handler is posted. A
+    // recoverable session completion that was already queued therefore
+    // converges on the same orderly shutdown result.
     void stop();
 
     [[nodiscard]] bool terminal() const noexcept;
@@ -169,6 +172,8 @@ public:
     [[nodiscard]] const LiveCaptureResult& result() const noexcept;
 
 private:
+    friend struct LiveCaptureControllerTestAccess;
+
     LiveCaptureController(
         boost::asio::io_context& io_context,
         std::unique_ptr<LiveSubscription> subscription,

@@ -660,10 +660,17 @@ void LiveCaptureController::on_session_terminal(
             LiveCaptureErrorCode::resume_notification_failure;
     }
     if (impl_->result.stop_requested) {
+        const bool recoverable_stop_result =
+            recoverable_session_error(session_result.code);
+        if (recoverable_stop_result &&
+            !impl_->failure_latched) {
+            ++impl_->result.metrics.recoverable_session_failures;
+        }
         const bool expected_stop_result =
             session_result.success() ||
             session_result.code ==
-                WebSocketSessionErrorCode::cancelled;
+                WebSocketSessionErrorCode::cancelled ||
+            recoverable_stop_result;
         if (!expected_stop_result &&
             !impl_->failure_latched) {
             impl_->failure_latched = true;
