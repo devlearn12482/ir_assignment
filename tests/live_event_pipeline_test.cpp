@@ -93,7 +93,7 @@ make_subscription(
     const std::uint64_t sequence,
     const std::string_view payload,
     const std::int64_t seconds = 1'700'000'000,
-    const std::uint32_t nanoseconds = 123U) noexcept {
+    const std::int32_t nanoseconds = 123) noexcept {
     return WebSocketTextMessage{
         CsvTimestamp{seconds, nanoseconds},
         epoch,
@@ -338,7 +338,19 @@ void test_metadata_and_epoch_contract(Context& context) {
     constexpr std::string_view refresh =
         R"({"stream":"btcusdt@depth5@100ms","data":{"lastUpdateId":100,"bids":[["100","1"]],"asks":[["101","2"]]}})";
 
+    WebSocketTextMessage negative_nanoseconds =
+        message(1U, 1U, refresh);
+    negative_nanoseconds.receive_timestamp.nanoseconds = -1;
     LivePipelineResult result = pipeline->process(
+        negative_nanoseconds, batch);
+    context.expect(
+        result.fatal() &&
+            result.error ==
+                LivePipelineErrorCode::invalid_message_metadata &&
+            batch.audit_row.empty(),
+        "negative receive nanoseconds are fatal before parsing");
+
+    result = pipeline->process(
         message(1U, 2U, refresh), batch);
     context.expect(
         result.has_batch() &&

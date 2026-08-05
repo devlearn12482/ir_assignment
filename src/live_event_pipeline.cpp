@@ -9,7 +9,7 @@
 namespace hft {
 namespace {
 
-constexpr std::uint32_t kNanosecondsPerSecond{1'000'000'000U};
+constexpr std::int32_t kNanosecondsPerSecond{1'000'000'000};
 
 [[nodiscard]] LivePipelineResult fatal_result(
     const LivePipelineErrorCode error) noexcept {
@@ -39,7 +39,8 @@ struct LiveEventPipeline::Impl {
 
     [[nodiscard]] bool valid_message_metadata(
         const WebSocketTextMessage& message) const noexcept {
-        if (message.receive_timestamp.nanoseconds >=
+        if (message.receive_timestamp.nanoseconds < 0 ||
+            message.receive_timestamp.nanoseconds >=
                 kNanosecondsPerSecond ||
             message.connection_sequence == 0U) {
             return false;

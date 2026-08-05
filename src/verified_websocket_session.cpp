@@ -263,7 +263,7 @@ struct VerifiedWebSocketSession::Impl {
         timestamp.seconds =
             static_cast<std::int64_t>(seconds.count());
         timestamp.nanoseconds =
-            static_cast<std::uint32_t>(nanoseconds.count());
+            static_cast<std::int32_t>(nanoseconds.count());
         return true;
     }
 

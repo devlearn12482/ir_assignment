@@ -60,7 +60,7 @@ private:
     const std::uint64_t epoch = 0U,
     const std::string_view symbol = "BTCUSDT") noexcept {
     return EventContext{
-        CsvTimestamp{1'700'000'123U, 987'654'321U},
+        CsvTimestamp{1'700'000'123, 987'654'321},
         venue,
         kind,
         0U,

@@ -40,10 +40,11 @@ enum class CsvFormatError : std::uint8_t {
 };
 
 struct CsvTimestamp {
-    // The CSV contract defines tsec/recv_tsec as signed int64. Nanoseconds are
-    // normalized to [0, 1e9), including for pre-epoch timestamps.
+    // The CSV contract defines tsec/recv_tsec as signed int64 and
+    // tnsec/recv_tnsec as signed int32 normalized to [0, 1e9), including for
+    // pre-epoch timestamps.
     std::int64_t seconds{0};
-    std::uint32_t nanoseconds{0};
+    std::int32_t nanoseconds{0};
 };
 
 struct MarketDataCsvRow {

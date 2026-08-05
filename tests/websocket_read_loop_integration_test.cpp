@@ -853,7 +853,7 @@ bool valid_message_metadata(const ClientOutcome& outcome) {
     return outcome.connection_epoch == 0U &&
            outcome.connection_sequence == 1U &&
            outcome.timestamp.seconds != 0U &&
-           outcome.timestamp.nanoseconds < 1'000'000'000U;
+           outcome.timestamp.nanoseconds < 1'000'000'000;
 }
 
 bool run_case(

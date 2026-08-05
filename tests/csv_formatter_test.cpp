@@ -7,9 +7,15 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <type_traits>
 
 namespace hft::test {
 namespace {
+
+static_assert(
+    std::is_same_v<decltype(CsvTimestamp::seconds), std::int64_t>);
+static_assert(
+    std::is_same_v<decltype(CsvTimestamp::nanoseconds), std::int32_t>);
 
 [[nodiscard]] std::size_t comma_count(
     const std::string_view text) noexcept {
@@ -46,7 +52,7 @@ void test_market_data_row_escaping(Context& context) {
     const std::string payload =
         "{\"e\":\"depthUpdate\",\"note\":\"a,b\",\"raw\":\"x\r\ny\"}";
     const MarketDataCsvRow row{
-        CsvTimestamp{1'700'000'000U, 123'456'789U},
+        CsvTimestamp{1'700'000'000, 123'456'789},
         PayloadVenue::spot,
         SpotStreamKind::depth_diff,
         0U,
@@ -74,7 +80,7 @@ void test_market_data_row_escaping(Context& context) {
         "market-data records use LF terminators");
 
     MarketDataCsvRow pre_epoch = row;
-    pre_epoch.timestamp = CsvTimestamp{-1, 999'999'999U};
+    pre_epoch.timestamp = CsvTimestamp{-1, 999'999'999};
     context.expect(
         format_market_data_csv_row(pre_epoch, buffer) ==
                 CsvFormatError::none &&
@@ -106,7 +112,7 @@ void test_market_data_row_escaping(Context& context) {
 void test_market_data_validation_and_limit(Context& context) {
     CsvRecordBuffer buffer;
     MarketDataCsvRow row{
-        CsvTimestamp{1U, 2U},
+        CsvTimestamp{1, 2},
         PayloadVenue::spot,
         SpotStreamKind::depth_diff,
         0U,
@@ -120,13 +126,19 @@ void test_market_data_validation_and_limit(Context& context) {
             CsvFormatError::none,
         "baseline market-data row is valid");
 
-    row.timestamp.nanoseconds = 1'000'000'000U;
+    row.timestamp.nanoseconds = 1'000'000'000;
     context.expect(
         format_market_data_csv_row(row, buffer) ==
                 CsvFormatError::invalid_timestamp &&
             buffer.empty(),
         "invalid nanoseconds fail without a partial row");
-    row.timestamp.nanoseconds = 2U;
+    row.timestamp.nanoseconds = -1;
+    context.expect(
+        format_market_data_csv_row(row, buffer) ==
+                CsvFormatError::invalid_timestamp &&
+            buffer.empty(),
+        "negative nanoseconds fail without a partial row");
+    row.timestamp.nanoseconds = 2;
 
     row.connection_sequence = 0U;
     context.expect(
@@ -200,7 +212,7 @@ void test_order_book_row(Context& context) {
         BookLevel{10'100'000'000LL, 300'000'000LL},
     }};
     const OrderBookCsvRow row{
-        CsvTimestamp{1'700'000'000U, 123'456'789U},
+        CsvTimestamp{1'700'000'000, 123'456'789},
         42U,
         123'456'789,
         BookRowType::differential,
@@ -232,7 +244,7 @@ void test_order_book_row(Context& context) {
         "order-book row is quote-free by construction");
 
     OrderBookCsvRow pre_epoch = row;
-    pre_epoch.timestamp = CsvTimestamp{-1, 999'999'999U};
+    pre_epoch.timestamp = CsvTimestamp{-1, 999'999'999};
     context.expect(
         format_order_book_csv_row(pre_epoch, buffer) ==
                 CsvFormatError::none &&
@@ -281,7 +293,7 @@ void test_order_book_validation(Context& context) {
     }};
     CsvRecordBuffer buffer;
     OrderBookCsvRow row{
-        CsvTimestamp{1U, 0U},
+        CsvTimestamp{1, 0},
         1U,
         1,
         BookRowType::differential,
