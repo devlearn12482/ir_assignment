@@ -450,10 +450,17 @@ void LiveCaptureController::request_stop_on_io() noexcept {
             impl_->session->stop();
             return;
         } catch (...) {
-            impl_->result.error =
-                LiveCaptureErrorCode::resume_notification_failure;
-            impl_->failure_latched = true;
+            handle_session_stop_exception();
+            return;
         }
+    }
+    finalize_run();
+}
+
+void LiveCaptureController::handle_session_stop_exception() noexcept {
+    if (!impl_->failure_latched) {
+        impl_->failure_latched = true;
+        impl_->result.error = LiveCaptureErrorCode::session_failure;
     }
     finalize_run();
 }
@@ -922,8 +929,8 @@ void LiveCaptureController::fail(
             return;
         }
     } catch (...) {
-        impl_->resume_post_failed.store(
-            true, std::memory_order_release);
+        handle_session_stop_exception();
+        return;
     }
     finalize_run();
 }
