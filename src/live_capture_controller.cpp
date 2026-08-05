@@ -667,13 +667,16 @@ void LiveCaptureController::on_session_terminal(
             LiveCaptureErrorCode::resume_notification_failure;
     }
     if (impl_->result.stop_requested) {
-        const bool recoverable_stop_result =
-            recoverable_session_error(session_result.code);
         const bool close_handshake_ended_during_stop =
-            session_result.code ==
-                WebSocketSessionErrorCode::close_failure &&
             session_result.stage ==
-                WebSocketSessionStage::websocket_close;
+                WebSocketSessionStage::websocket_close &&
+            (session_result.code ==
+                 WebSocketSessionErrorCode::close_failure ||
+             session_result.code ==
+                 WebSocketSessionErrorCode::timeout);
+        const bool recoverable_stop_result =
+            recoverable_session_error(session_result.code) &&
+            !close_handshake_ended_during_stop;
         if (recoverable_stop_result &&
             !impl_->failure_latched) {
             ++impl_->result.metrics.recoverable_session_failures;

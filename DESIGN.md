@@ -266,8 +266,9 @@ Metrics are fixed-name `uint64_t` monotonic counters or high-water values alloca
 - Audit rows and order-book rows written.
 - Stale diffs, sequence gaps, and invalidations.
 - Reconnect attempts and successful connection epochs.
-- Connection attempts, successes, scheduled reconnects, recoverable failures,
-  and the last observed session result for diagnostics.
+- Connection attempts, successes, scheduled reconnects, failures eligible for
+  reconnection before the explicit-close lifecycle, and the last observed
+  session result for diagnostics.
 - Complete binary data messages rejected before envelope parsing. This diagnostic counter is a component of the aggregate pre-audit-rejection counter, not an additional balance-equation term.
 - Message-policy connection terminations, broken down by binary message and oversized message, plus shared consecutive-breaker trips.
 - Producer pause/resume transitions.
@@ -808,7 +809,7 @@ Rules:
 - Backoff and reconnect timers are cancellable during shutdown.
 - Every asynchronous completion first checks its connection generation and then the terminal gate before changing state, publishing a batch, reconnecting, or completing shutdown.
 - A phase timeout cancels or closes the operation at the lowest safe layer. The resulting late completion is consumed as expected cancellation and cannot schedule a second transition.
-- Each recoverable or fatal failure increments its full-resolution counter. Rate-limited logs include phase, session state, venue, generation, `conn_epoch` when established, native error category/value, retry attempt/delay when applicable, and the chosen action; payload bytes are not logged.
+- Each recoverable or fatal failure increments its applicable counter. A close failure or close deadline reached after an explicit stop is lifecycle-only: it is retained as the last session result but does not increment the reconnect-eligible failure counter. Rate-limited logs include phase, session state, venue, generation, `conn_epoch` when established, native error category/value, retry attempt/delay when applicable, and the chosen action; payload bytes are not logged.
 
 ### 15.1 Complete-message and reconnect semantics
 
@@ -844,7 +845,7 @@ Ordered shutdown:
 2. The first `SIGINT` or `SIGTERM` requests this graceful path. The signal wait remains armed while the I/O context runs; later signals increment the repeated-stop counter and call the same idempotent stop entry point. They do not call `abort`, `_Exit`, or bypass writer accounting.
 3. Cancel duration, reconnect, resolve, and connection timers.
 4. Stop initiating new reads or replay records.
-5. If a WebSocket session is active and the transport permits it, initiate an asynchronous close handshake with the two-second deadline; otherwise cancel/close the lowest layer. Once an explicit stop is active, a peer-side close-handshake failure is retained as `connections.last_session_result=close_failure` but is not fatal: local transport teardown and checked writer drain still complete. Callback failures and close failures outside this lifecycle context remain fatal.
+5. If a WebSocket session is active and the transport permits it, initiate an asynchronous close handshake with the two-second deadline; otherwise cancel/close the lowest layer. Once an explicit stop is active, a peer-side close-handshake failure or deadline is retained as `connections.last_session_result=close_failure` or `timeout` but is neither fatal nor counted as a reconnect-eligible failure: local transport teardown and checked writer drain still complete. Callback failures and close failures outside this lifecycle context remain fatal; timeouts outside the close stage retain their normal recoverable policy.
 6. Through the session terminal gate, wait until every producer callback has either completed or returned as stale/cancelled and no callback can enqueue another batch.
 7. Close the writer queue.
 8. Drain queued batches, flush and close every file.
