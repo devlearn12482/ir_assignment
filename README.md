@@ -451,11 +451,13 @@ last observed session outcome, including a recovered error or orderly
 cancellation. `failure.session` is non-`none` only when the terminal capture
 failure is attributed to the session or the message-policy breaker; therefore
 every successful duration, signal, or reconnect-backoff stop reports
-`failure.session=none`. If the peer does not complete its close handshake after
-an explicit stop, `connections.last_session_result=close_failure` records that
-diagnostic while checked writer drain still determines capture success. Fatal
-writer runs retain enqueued/written/unwritten counts instead of claiming the
-success equalities.
+`failure.session=none`. If the peer rejects or does not complete its close
+handshake after an explicit stop, `connections.last_session_result` records
+`close_failure` or `timeout` while checked writer drain still determines
+capture success. These close-stage lifecycle outcomes do not increment
+`connections.recoverable_failures`; no reconnect is attempted after stopping.
+Fatal writer runs retain enqueued/written/unwritten counts instead of claiming
+the success equalities.
 
 ## Tests and review evidence
 

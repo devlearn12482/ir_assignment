@@ -264,6 +264,24 @@ void test_stop_terminal_policy(Context& context) {
         WebSocketSessionErrorCode::none,
         "peer close-handshake failure does not fail an explicit stop");
     run_case(
+        WebSocketSessionErrorCode::timeout,
+        WebSocketSessionStage::websocket_close,
+        true,
+        0U,
+        1U,
+        LiveCaptureErrorCode::none,
+        WebSocketSessionErrorCode::none,
+        "close deadline is lifecycle-only after an explicit stop");
+    run_case(
+        WebSocketSessionErrorCode::timeout,
+        WebSocketSessionStage::read,
+        true,
+        1U,
+        1U,
+        LiveCaptureErrorCode::none,
+        WebSocketSessionErrorCode::none,
+        "timeout outside the close stage remains recoverable");
+    run_case(
         WebSocketSessionErrorCode::close_failure,
         WebSocketSessionStage::read,
         false,
