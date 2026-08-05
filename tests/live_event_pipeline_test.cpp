@@ -92,7 +92,7 @@ make_subscription(
     const std::uint64_t epoch,
     const std::uint64_t sequence,
     const std::string_view payload,
-    const std::uint64_t seconds = 1'700'000'000U,
+    const std::int64_t seconds = 1'700'000'000,
     const std::uint32_t nanoseconds = 123U) noexcept {
     return WebSocketTextMessage{
         CsvTimestamp{seconds, nanoseconds},

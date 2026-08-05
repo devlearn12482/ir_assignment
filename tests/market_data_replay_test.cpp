@@ -4,9 +4,11 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -63,7 +65,7 @@ void write_binary_file(
     const std::uint64_t epoch,
     const std::uint64_t sequence,
     const std::string_view payload,
-    const std::uint64_t seconds = 1'700'000'000U,
+    const std::int64_t seconds = 1'700'000'000,
     const std::uint32_t nanoseconds = 123U) {
     const MarketDataCsvRow row{
         CsvTimestamp{seconds, nanoseconds},
@@ -218,6 +220,18 @@ void test_header_and_column_validation(Context& context) {
         "nonnumeric timestamp");
     expect_next_error(
         context,
+        "9223372036854775808,2,spot,trade,0,0,1,BTCUSDT,\"{}\"\n",
+        ReplayReadErrorCode::invalid_integer,
+        ReplayColumn::recv_tsec,
+        "positive timestamp overflow");
+    expect_next_error(
+        context,
+        "-9223372036854775809,2,spot,trade,0,0,1,BTCUSDT,\"{}\"\n",
+        ReplayReadErrorCode::invalid_integer,
+        ReplayColumn::recv_tsec,
+        "negative timestamp overflow");
+    expect_next_error(
+        context,
         "1,1000000000,spot,trade,0,0,1,BTCUSDT,\"{}\"\n",
         ReplayReadErrorCode::invalid_range,
         ReplayColumn::recv_tnsec,
@@ -270,6 +284,52 @@ void test_header_and_column_validation(Context& context) {
         ReplayReadErrorCode::truncated_record,
         ReplayColumn::none,
         "missing final LF");
+}
+
+void test_signed_timestamp_boundaries(Context& context) {
+    TemporaryDirectory directory;
+    const auto path = directory.path() / "signed-timestamps.csv";
+    write_binary_file(
+        path,
+        std::string{kMarketDataCsvHeader} +
+            audit_row(
+                "BTCUSDT",
+                PayloadVenue::spot,
+                SpotStreamKind::trade,
+                0U,
+                1U,
+                "{}",
+                std::numeric_limits<std::int64_t>::min(),
+                999'999'999U) +
+            audit_row(
+                "BTCUSDT",
+                PayloadVenue::spot,
+                SpotStreamKind::trade,
+                0U,
+                2U,
+                "{}",
+                std::numeric_limits<std::int64_t>::max(),
+                0U));
+
+    ReplayReadError open_error;
+    auto reader = MarketDataReplayReader::open(path.string(), open_error);
+    const ReplayReadResult first =
+        reader ? reader->next() : ReplayReadResult{};
+    const bool minimum_preserved =
+        reader && first.status == ReplayReadStatus::record &&
+        reader->record().context().timestamp.seconds ==
+            std::numeric_limits<std::int64_t>::min() &&
+        reader->record().context().timestamp.nanoseconds ==
+            999'999'999U;
+    const ReplayReadResult second =
+        reader ? reader->next() : ReplayReadResult{};
+    context.expect(
+        !open_error && minimum_preserved &&
+            second.status == ReplayReadStatus::record &&
+            reader->record().context().timestamp.seconds ==
+                std::numeric_limits<std::int64_t>::max() &&
+            reader->record().context().timestamp.nanoseconds == 0U,
+        "replay preserves the complete signed int64 timestamp range");
 }
 
 void test_payload_and_record_limits(Context& context) {
@@ -536,6 +596,7 @@ void test_runner_rejects_corrupt_payload_and_wrong_target(
 void run_market_data_replay_tests(Context& context) {
     test_rfc4180_reader_and_padded_reuse(context);
     test_header_and_column_validation(context);
+    test_signed_timestamp_boundaries(context);
     test_payload_and_record_limits(context);
     test_file_identity_and_sequence_validation(context);
     test_spot_and_usdm_fixture_equivalence(context);

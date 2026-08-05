@@ -27,7 +27,7 @@ constexpr std::array<ReplayColumn, 8U> kUnquotedColumns{
 };
 
 template <typename Integer>
-[[nodiscard]] bool parse_unsigned_integer(
+[[nodiscard]] bool parse_integer(
     const std::string_view field,
     Integer& value) noexcept {
     if (field.empty()) {
@@ -401,14 +401,14 @@ ReplayReadError MarketDataReplayReader::decode_record(
             ReplayColumn::payload_json);
     }
 
-    std::uint64_t seconds{0};
-    if (!parse_unsigned_integer(fields[0], seconds)) {
+    std::int64_t seconds{0};
+    if (!parse_integer(fields[0], seconds)) {
         return make_error(
             ReplayReadErrorCode::invalid_integer,
             ReplayColumn::recv_tsec);
     }
     std::uint32_t nanoseconds{0};
-    if (!parse_unsigned_integer(fields[1], nanoseconds)) {
+    if (!parse_integer(fields[1], nanoseconds)) {
         return make_error(
             ReplayReadErrorCode::invalid_integer,
             ReplayColumn::recv_tnsec);
@@ -433,7 +433,7 @@ ReplayReadError MarketDataReplayReader::decode_record(
     }
 
     std::uint32_t shard_id{0};
-    if (!parse_unsigned_integer(fields[4], shard_id)) {
+    if (!parse_integer(fields[4], shard_id)) {
         return make_error(
             ReplayReadErrorCode::invalid_integer,
             ReplayColumn::shard_id);
@@ -444,13 +444,13 @@ ReplayReadError MarketDataReplayReader::decode_record(
             ReplayColumn::shard_id);
     }
     std::uint64_t connection_epoch{0};
-    if (!parse_unsigned_integer(fields[5], connection_epoch)) {
+    if (!parse_integer(fields[5], connection_epoch)) {
         return make_error(
             ReplayReadErrorCode::invalid_integer,
             ReplayColumn::conn_epoch);
     }
     std::uint64_t connection_sequence{0};
-    if (!parse_unsigned_integer(
+    if (!parse_integer(
             fields[6], connection_sequence)) {
         return make_error(
             ReplayReadErrorCode::invalid_integer,
