@@ -131,6 +131,39 @@ jobs:
 
           output_dir="${RUNNER_TEMP}/binance-live-smoke"
           metrics_file="${RUNNER_TEMP}/binance-live-smoke.metrics"
+          probe_headers="${RUNNER_TEMP}/binance-websocket-probe.headers"
+          probe_body="${RUNNER_TEMP}/binance-websocket-probe.body"
+          probe_stderr="${RUNNER_TEMP}/binance-websocket-probe.stderr"
+          probe_summary="${RUNNER_TEMP}/binance-websocket-probe.summary"
+
+          probe_status=0
+          probe_http_code="$(
+            curl --silent --show-error --http1.1 --max-time 8 \
+              --output "${probe_body}" \
+              --dump-header "${probe_headers}" \
+              --write-out '%{http_code}' \
+              -H 'Connection: Upgrade' \
+              -H 'Upgrade: websocket' \
+              -H 'Sec-WebSocket-Version: 13' \
+              -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+              'https://stream.binance.com:9443/stream?streams=btcusdt@trade' \
+              2>"${probe_stderr}"
+          )" || probe_status=$?
+          {
+            printf 'native_websocket_probe_curl_exit=%s\n' "${probe_status}"
+            printf 'native_websocket_probe_http_status=%s\n' \
+              "${probe_http_code}"
+          } | tee "${probe_summary}"
+          if test -s "${probe_stderr}"; then
+            cat "${probe_stderr}"
+          fi
+          if test -f "${probe_headers}"; then
+            sed -n '1,20p' "${probe_headers}"
+          fi
+          if test -f "${probe_body}"; then
+            head -c 512 "${probe_body}" || true
+            printf '\n'
+          fi
 
           cmake --build build-strict --target binance_capture --parallel
           capture_status=0
@@ -219,5 +252,9 @@ jobs:
           path: |
             ${{ runner.temp }}/binance-live-smoke
             ${{ runner.temp }}/binance-live-smoke.metrics
+            ${{ runner.temp }}/binance-websocket-probe.body
+            ${{ runner.temp }}/binance-websocket-probe.headers
+            ${{ runner.temp }}/binance-websocket-probe.stderr
+            ${{ runner.temp }}/binance-websocket-probe.summary
           if-no-files-found: warn
           retention-days: 7
