@@ -73,6 +73,14 @@ void test_market_data_row_escaping(Context& context) {
             buffer.view().substr(buffer.view().size() - 2U) != "\r\n",
         "market-data records use LF terminators");
 
+    MarketDataCsvRow pre_epoch = row;
+    pre_epoch.timestamp = CsvTimestamp{-1, 999'999'999U};
+    context.expect(
+        format_market_data_csv_row(pre_epoch, buffer) ==
+                CsvFormatError::none &&
+            buffer.view().find("-1,999999999,") == 0U,
+        "market-data tsec serializes as signed int64");
+
     MarketDataCsvRow depth5 = row;
     depth5.venue = PayloadVenue::usdm;
     depth5.stream_kind = SpotStreamKind::depth5;
@@ -222,6 +230,14 @@ void test_order_book_row(Context& context) {
     context.expect(
         buffer.view().find('"') == std::string_view::npos,
         "order-book row is quote-free by construction");
+
+    OrderBookCsvRow pre_epoch = row;
+    pre_epoch.timestamp = CsvTimestamp{-1, 999'999'999U};
+    context.expect(
+        format_order_book_csv_row(pre_epoch, buffer) ==
+                CsvFormatError::none &&
+            buffer.view().find("-1,999999999,") == 0U,
+        "order-book tsec serializes as signed int64");
 
     OrderBookCsvRow refresh = row;
     refresh.row_type = BookRowType::partial_refresh;

@@ -190,6 +190,8 @@ awk -F',' 'NR==2 { print NF }' ./output/*_orderbook.csv
 
 - Live `recv_tsec`/`recv_tnsec` are sampled once from `system_clock` after the
   complete logical WebSocket message has been read.
+- `recv_tsec`/`tsec` are signed 64-bit epoch seconds as required by the CSV
+  contract; `recv_tnsec`/`tnsec` are normalized to `[0, 1000000000)`.
 - An order-book row copies the corresponding audit row timestamp.
 - Replay copies the persisted receive timestamp unchanged; fixed input bytes
   therefore produce byte-identical order-book output.

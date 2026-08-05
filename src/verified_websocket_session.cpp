@@ -248,17 +248,20 @@ struct VerifiedWebSocketSession::Impl {
         const auto elapsed =
             std::chrono::system_clock::now().time_since_epoch();
         const auto seconds =
-            std::chrono::duration_cast<std::chrono::seconds>(
-                elapsed);
+            std::chrono::floor<std::chrono::seconds>(elapsed);
         const auto nanoseconds =
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 elapsed - seconds);
-        if (seconds.count() < 0 || nanoseconds.count() < 0 ||
+        if (seconds.count() <
+                std::numeric_limits<std::int64_t>::min() ||
+            seconds.count() >
+                std::numeric_limits<std::int64_t>::max() ||
+            nanoseconds.count() < 0 ||
             nanoseconds.count() >= 1'000'000'000) {
             return false;
         }
         timestamp.seconds =
-            static_cast<std::uint64_t>(seconds.count());
+            static_cast<std::int64_t>(seconds.count());
         timestamp.nanoseconds =
             static_cast<std::uint32_t>(nanoseconds.count());
         return true;
