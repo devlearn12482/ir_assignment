@@ -294,27 +294,36 @@ tsec,tnsec,seqNo,id,type,side,bid0,bid1,bid2,bid3,bid4,bid_size0,bid_size1,bid_s
 1700000000,100,1,1747767916,P,N,10000000000,0,0,0,0,100000000,0,0,0,0,10100000000,0,0,0,0,100000000,0,0,0,0
 ```
 
-### Live smoke sample
+### Two-minute live sample
 
-On 2026-08-03, the public Spot command was run for five seconds with
-`BTCUSDT`. It completed one verified connection, processed 92 messages from
-all three subscribed stream kinds, wrote 92 audit rows and 42 book rows, and
-reported zero pre-audit rejections, gaps, crossed books, unwritten rows, or
-backpressure pauses. To keep the repository small, the matching live files
-are represented by this one-event truncation as permitted by the assignment.
+On 2026-08-05, the public Spot command above was run for 120 seconds with
+`BTCUSDT`. It completed one verified connection and processed 6,052 messages:
+724 `depth_diff`, 725 `depth5`, and 4,603 `trade` events. It wrote all 6,052
+audit rows and all 725 emitted book rows, with zero pre-audit or schema
+rejections, sequence gaps, crossed books, unwritten rows, reconnects, or
+backpressure pauses. The explicit-stop close deadline remained diagnostic
+only: `connections.last_session_result=timeout`,
+`connections.recoverable_failures=0`, and the run completed successfully.
+
+Offline replay then read and processed all 6,052 audit rows and regenerated
+all 725 book rows without network access. The live and replayed order-book
+files were byte-identical, both with SHA-256
+`2f59696f605d531e1ea78520ad155b424f453fcef2618e75f7e6b7f627c47e41`.
+To keep the repository small, the matching live files are represented by this
+one-event truncation as permitted by the assignment.
 
 Audit event:
 
 ```csv
 recv_tsec,recv_tnsec,venue,stream_kind,shard_id,conn_epoch,conn_seq,symbol,payload_json
-1785761558,398750074,spot,depth5,0,0,2,BTCUSDT,"{""lastUpdateId"":98171209985,""bids"":[[""62714.00000000"",""2.73518000""],[""62713.99000000"",""0.00088000""],[""62713.98000000"",""0.01862000""],[""62713.95000000"",""0.01931000""],[""62713.90000000"",""0.00018000""]],""asks"":[[""62714.01000000"",""3.07856000""],[""62714.02000000"",""0.00133000""],[""62714.03000000"",""0.00034000""],[""62714.04000000"",""0.01793000""],[""62714.48000000"",""0.00016000""]]}"
+1785947196,375097924,spot,depth5,0,0,1,BTCUSDT,"{""lastUpdateId"":98268827980,""bids"":[[""64695.99000000"",""5.41310000""],[""64695.98000000"",""0.00025000""],[""64695.97000000"",""0.00016000""],[""64695.68000000"",""0.00018000""],[""64695.67000000"",""0.46474000""]],""asks"":[[""64696.00000000"",""0.62683000""],[""64696.01000000"",""0.00097000""],[""64696.02000000"",""0.00016000""],[""64696.60000000"",""0.00466000""],[""64697.14000000"",""0.00008000""]]}"
 ```
 
 Matching order-book event:
 
 ```csv
 tsec,tnsec,seqNo,id,type,side,bid0,bid1,bid2,bid3,bid4,bid_size0,bid_size1,bid_size2,bid_size3,bid_size4,ask0,ask1,ask2,ask3,ask4,ask_size0,ask_size1,ask_size2,ask_size3,ask_size4
-1785761558,398750074,1,1747767916,P,N,6271400000000,6271399000000,6271398000000,6271395000000,6271390000000,273518000,88000,1862000,1931000,18000,6271401000000,6271402000000,6271403000000,6271404000000,6271448000000,307856000,133000,34000,1793000,16000
+1785947196,375097924,1,1747767916,P,N,6469599000000,6469598000000,6469597000000,6469568000000,6469567000000,541310000,25000,16000,18000,46474000,6469600000000,6469601000000,6469602000000,6469660000000,6469714000000,62683000,97000,16000,466000,8000
 ```
 
 ## Threading, I/O, and resource policy
