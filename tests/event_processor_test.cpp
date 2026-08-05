@@ -39,7 +39,7 @@ private:
     const std::uint64_t connection_sequence,
     const std::string_view symbol = "BTCUSDT") noexcept {
     return EventContext{
-        CsvTimestamp{1'700'000'000U, 123'456'789U},
+        CsvTimestamp{1'700'000'000, 123'456'789},
         venue,
         kind,
         0U,
@@ -393,12 +393,18 @@ void test_context_and_epoch_policy(Context& context) {
 
     EventContext invalid_timestamp = event_context(
         PayloadVenue::spot, SpotStreamKind::trade, 3U, 3U);
-    invalid_timestamp.timestamp.nanoseconds = 1'000'000'000U;
+    invalid_timestamp.timestamp.nanoseconds = 1'000'000'000;
     result = process(
         processor, *state, batch, invalid_timestamp, "{}");
     context.expect(
         result.error == EventProcessError::invalid_context,
-        "invalid receive nanoseconds are rejected at context boundary");
+        "overflow receive nanoseconds are rejected at context boundary");
+    invalid_timestamp.timestamp.nanoseconds = -1;
+    result = process(
+        processor, *state, batch, invalid_timestamp, "{}");
+    context.expect(
+        result.error == EventProcessError::invalid_context,
+        "negative receive nanoseconds are rejected at context boundary");
 
     EventContext invalid_shard = event_context(
         PayloadVenue::spot, SpotStreamKind::trade, 3U, 3U);

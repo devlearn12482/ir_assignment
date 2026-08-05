@@ -407,13 +407,13 @@ ReplayReadError MarketDataReplayReader::decode_record(
             ReplayReadErrorCode::invalid_integer,
             ReplayColumn::recv_tsec);
     }
-    std::uint32_t nanoseconds{0};
+    std::int32_t nanoseconds{0};
     if (!parse_integer(fields[1], nanoseconds)) {
         return make_error(
             ReplayReadErrorCode::invalid_integer,
             ReplayColumn::recv_tnsec);
     }
-    if (nanoseconds >= 1'000'000'000U) {
+    if (nanoseconds < 0 || nanoseconds >= 1'000'000'000) {
         return make_error(
             ReplayReadErrorCode::invalid_range,
             ReplayColumn::recv_tnsec);

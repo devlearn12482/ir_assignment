@@ -657,8 +657,9 @@ recv_tsec,recv_tnsec,venue,stream_kind,shard_id,conn_epoch,conn_seq,symbol,paylo
 - Emit one row for every recognized stream whose combined envelope is valid and whose inner `data` value is a syntactically valid JSON object, even if venue-schema validation fails or its depth update is later rejected as stale or gapped. This preserves the audit input required to reproduce the decision.
 - A malformed envelope or non-object/invalid inner JSON cannot produce a contract-compliant payload, so it consumes `conn_seq`, increments an error counter, and produces no audit row.
 - `payload_json` is the minified inner data object, never the outer combined envelope.
-- `recv_tsec` is a signed 64-bit epoch-second value and `recv_tnsec` is the
-  normalized nonnegative nanosecond remainder below one second.
+- `recv_tsec` is a signed 64-bit epoch-second value and `recv_tnsec` is a
+  signed 32-bit field containing the normalized nonnegative nanosecond
+  remainder below one second.
 - `payload_json` is always emitted as a quoted CSV field. Every contained `"` byte is emitted as `""`; commas and any CR/LF bytes therefore remain inside the quoted field. The implementation uses one shared RFC 4180 field-escaping routine rather than ad hoc JSON-specific replacements.
 
 ### 13.2 Order-book header
@@ -670,8 +671,8 @@ tsec,tnsec,seqNo,id,type,side,bid0,bid1,bid2,bid3,bid4,bid_size0,bid_size1,bid_s
 - Emit exactly 26 columns.
 - Emit only after an applied diff or valid partial refresh.
 - Timestamp equals the triggering market-data row timestamp.
-- `tsec` preserves the signed 64-bit audit timestamp exactly; `tnsec` remains
-  in `[0, 1000000000)`.
+- `tsec` preserves the signed 64-bit audit timestamp exactly; signed 32-bit
+  `tnsec` remains in `[0, 1000000000)`.
 - Prices and sizes are scaled integers.
 - Unavailable levels use zero price and zero size.
 - Per-file `seqNo` is contiguous; rejected events do not consume it.

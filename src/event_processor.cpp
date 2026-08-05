@@ -10,8 +10,7 @@
 namespace hft {
 namespace {
 
-inline constexpr std::uint32_t kNanosecondsPerSecond{
-    1'000'000'000U};
+inline constexpr std::int32_t kNanosecondsPerSecond{1'000'000'000};
 inline constexpr std::size_t kOrderBookRecordCapacity{1024U};
 
 [[nodiscard]] bool valid_venue(
@@ -119,6 +118,7 @@ inline constexpr std::size_t kOrderBookRecordCapacity{1024U};
         context.venue != state.venue() ||
         context.symbol != state.symbol() ||
         context.shard_id != 0U ||
+        context.timestamp.nanoseconds < 0 ||
         context.timestamp.nanoseconds >= kNanosecondsPerSecond ||
         context.connection_sequence == 0U) {
         return false;

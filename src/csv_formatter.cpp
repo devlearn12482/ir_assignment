@@ -15,8 +15,7 @@
 namespace hft {
 namespace {
 
-inline constexpr std::uint32_t kNanosecondsPerSecond{
-    1'000'000'000U};
+inline constexpr std::int32_t kNanosecondsPerSecond{1'000'000'000};
 [[nodiscard]] bool append_bytes(
     std::string& output,
     const std::string_view bytes) {
@@ -84,7 +83,8 @@ template <typename Integer>
 
 [[nodiscard]] bool valid_timestamp(
     const CsvTimestamp timestamp) noexcept {
-    return timestamp.nanoseconds < kNanosecondsPerSecond;
+    return timestamp.nanoseconds >= 0 &&
+           timestamp.nanoseconds < kNanosecondsPerSecond;
 }
 
 [[nodiscard]] std::string_view venue_text(

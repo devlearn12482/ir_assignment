@@ -142,7 +142,7 @@ void fill_audit_row(
     const std::string_view payload = "{}") {
     batch.clear();
     const MarketDataCsvRow row{
-        CsvTimestamp{1'700'000'000U, 123U},
+        CsvTimestamp{1'700'000'000, 123},
         PayloadVenue::spot,
         SpotStreamKind::trade,
         0U,
@@ -165,7 +165,7 @@ void fill_book_row(EventRowBatch& batch) {
         BookLevel{10'100'000'000LL, 300'000'000LL},
     }};
     const OrderBookCsvRow row{
-        CsvTimestamp{1'700'000'000U, 123U},
+        CsvTimestamp{1'700'000'000, 123},
         1U,
         123'456,
         BookRowType::partial_refresh,

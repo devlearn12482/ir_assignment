@@ -66,7 +66,7 @@ void write_binary_file(
     const std::uint64_t sequence,
     const std::string_view payload,
     const std::int64_t seconds = 1'700'000'000,
-    const std::uint32_t nanoseconds = 123U) {
+    const std::int32_t nanoseconds = 123) {
     const MarketDataCsvRow row{
         CsvTimestamp{seconds, nanoseconds},
         venue,
@@ -236,6 +236,12 @@ void test_header_and_column_validation(Context& context) {
         ReplayReadErrorCode::invalid_range,
         ReplayColumn::recv_tnsec,
         "nanosecond overflow");
+    expect_next_error(
+        context,
+        "1,-1,spot,trade,0,0,1,BTCUSDT,\"{}\"\n",
+        ReplayReadErrorCode::invalid_range,
+        ReplayColumn::recv_tnsec,
+        "negative nanoseconds");
     expect_next_error(
         context,
         "1,2,spot,trade,1,0,1,BTCUSDT,\"{}\"\n",
