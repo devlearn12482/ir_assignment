@@ -133,12 +133,24 @@ jobs:
           metrics_file="${RUNNER_TEMP}/binance-live-smoke.metrics"
 
           cmake --build build-strict --target binance_capture --parallel
+          capture_status=0
           ./build-strict/binance_capture \
             --venue spot \
             --symbols BTCUSDT \
             --duration 15 \
             --output-dir "${output_dir}" \
-            2>"${metrics_file}"
+            2>"${metrics_file}" || capture_status=$?
+
+          if test -f "${metrics_file}"; then
+            cat "${metrics_file}"
+          else
+            printf 'native live capture produced no metrics file\n' >&2
+          fi
+          if test "${capture_status}" -ne 0; then
+            printf 'native live capture exit_code=%s\n' \
+              "${capture_status}" >&2
+            exit "${capture_status}"
+          fi
 
           mapfile -t audit_files < <(
             find "${output_dir}" -maxdepth 1 -type f \
@@ -198,4 +210,14 @@ jobs:
           printf 'native_live_audit_rows=%s\n' "${audit_rows}"
           printf 'native_live_book_rows=%s\n' "${book_rows}"
           sha256sum "${audit_file}" "${book_file}"
-          cat "${metrics_file}"
+
+      - name: Upload native live smoke evidence
+        if: always() && github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-binance-live-smoke
+          path: |
+            ${{ runner.temp }}/binance-live-smoke
+            ${{ runner.temp }}/binance-live-smoke.metrics
+          if-no-files-found: warn
+          retention-days: 7
