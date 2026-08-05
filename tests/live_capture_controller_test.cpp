@@ -133,10 +133,13 @@ void test_stop_terminal_policy(Context& context) {
     const auto run_case = [&](
                               const std::optional<
                                   WebSocketSessionErrorCode> session_code,
+                              const WebSocketSessionStage session_stage,
                               const bool expect_success,
                               const std::uint64_t expected_recoverable_failures,
                               const std::uint64_t expected_invalidations,
                               const LiveCaptureErrorCode expected_error,
+                              const WebSocketSessionErrorCode
+                                  expected_reported_session_failure,
                               const std::string_view label) {
         constexpr std::array<std::string_view, 1U> symbols{
             "BTCUSDT"};
@@ -194,7 +197,7 @@ void test_stop_terminal_policy(Context& context) {
                 1U,
                 WebSocketSessionResult{
                     *session_code,
-                    WebSocketSessionStage::read,
+                    session_stage,
                     {},
                     7U});
         } else {
@@ -218,31 +221,66 @@ void test_stop_terminal_policy(Context& context) {
                     expected_recoverable_failures &&
                 result.metrics.reconnects_scheduled == 0U &&
                 result.success() == expect_success &&
-                result.error == expected_error,
+                result.error == expected_error &&
+                result.reported_session_failure() ==
+                    expected_reported_session_failure,
             label);
     };
 
     run_case(
         WebSocketSessionErrorCode::remote_close,
+        WebSocketSessionStage::read,
         true,
         1U,
         1U,
         LiveCaptureErrorCode::none,
+        WebSocketSessionErrorCode::none,
         "queued recoverable terminal result loses to stop intent");
     run_case(
         WebSocketSessionErrorCode::tls_verification_failure,
+        WebSocketSessionStage::tls_handshake,
         false,
         0U,
         1U,
         LiveCaptureErrorCode::session_failure,
+        WebSocketSessionErrorCode::tls_verification_failure,
         "stop intent does not mask a non-recoverable session failure");
     run_case(
         std::nullopt,
+        WebSocketSessionStage::none,
         false,
         0U,
         0U,
         LiveCaptureErrorCode::session_failure,
+        WebSocketSessionErrorCode::none,
         "session stop exception is classified as a session failure");
+    run_case(
+        WebSocketSessionErrorCode::close_failure,
+        WebSocketSessionStage::websocket_close,
+        true,
+        0U,
+        1U,
+        LiveCaptureErrorCode::none,
+        WebSocketSessionErrorCode::none,
+        "peer close-handshake failure does not fail an explicit stop");
+    run_case(
+        WebSocketSessionErrorCode::close_failure,
+        WebSocketSessionStage::read,
+        false,
+        0U,
+        1U,
+        LiveCaptureErrorCode::session_failure,
+        WebSocketSessionErrorCode::close_failure,
+        "close failure outside the close stage remains fatal");
+
+    LiveCaptureResult policy_failure;
+    policy_failure.error = LiveCaptureErrorCode::message_policy_breaker;
+    policy_failure.session.code =
+        WebSocketSessionErrorCode::binary_message;
+    context.expect(
+        policy_failure.reported_session_failure() ==
+            WebSocketSessionErrorCode::binary_message,
+        "message-policy failure reports its terminal session cause");
 }
 
 }  // namespace

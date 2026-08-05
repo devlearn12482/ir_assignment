@@ -50,7 +50,8 @@ foreach(expected_line
     "writer.book_rows_unwritten=0"
     "failure.capture=none"
     "failure.control=none"
-    "failure.session=none")
+    "failure.session=none"
+    "connections.last_session_result=")
     string(FIND "${capture_stderr}" "${expected_line}" position)
     if(position EQUAL -1)
         message(FATAL_ERROR
