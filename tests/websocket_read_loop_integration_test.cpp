@@ -1206,7 +1206,12 @@ bool run_case(
                 controller_outcome.create_error ||
                 !controller_outcome.terminal_called ||
                 !controller_outcome.controller_released ||
-                !controller_outcome.terminal.success()) {
+                !controller_outcome.terminal.success() ||
+                controller_outcome.terminal.session.code !=
+                    hft::WebSocketSessionErrorCode::remote_close ||
+                controller_outcome.terminal.
+                        reported_session_failure() !=
+                    hft::WebSocketSessionErrorCode::none) {
                 fail("stop during backoff did not drain cleanly");
                 break;
             }

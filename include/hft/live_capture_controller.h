@@ -126,6 +126,18 @@ struct LiveCaptureResult {
         return error == LiveCaptureErrorCode::none &&
                stop_requested && writer.success();
     }
+
+    // Only a terminal session or message-policy failure belongs in the
+    // failure.session metrics field. The last observed session result is
+    // retained separately for diagnostics and may describe a recovered error.
+    [[nodiscard]] WebSocketSessionErrorCode
+    reported_session_failure() const noexcept {
+        return error == LiveCaptureErrorCode::session_failure ||
+                       error ==
+                           LiveCaptureErrorCode::message_policy_breaker
+                   ? session.code
+                   : WebSocketSessionErrorCode::none;
+    }
 };
 
 struct LiveCaptureCallbacks {

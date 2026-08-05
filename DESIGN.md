@@ -266,7 +266,8 @@ Metrics are fixed-name `uint64_t` monotonic counters or high-water values alloca
 - Audit rows and order-book rows written.
 - Stale diffs, sequence gaps, and invalidations.
 - Reconnect attempts and successful connection epochs.
-- Connection attempts, successes, scheduled reconnects, and recoverable failures.
+- Connection attempts, successes, scheduled reconnects, recoverable failures,
+  and the last observed session result for diagnostics.
 - Complete binary data messages rejected before envelope parsing. This diagnostic counter is a component of the aggregate pre-audit-rejection counter, not an additional balance-equation term.
 - Message-policy connection terminations, broken down by binary message and oversized message, plus shared consecutive-breaker trips.
 - Producer pause/resume transitions.
@@ -300,7 +301,12 @@ METRICS_END
 - `events.audit_eligible` counts recognized events with a valid combined envelope and syntactically valid object payload. `events.processed` counts audit-eligible live events, or valid replay rows, that completed shared payload classification.
 - Schema-invalid but syntactically valid depth events are processed and counted even when they do not apply. Separate counters record schema failures, applied diffs, applied refreshes, stale events, gaps, invalidations, and trades audited.
 - Enqueued counters advance only after a complete row is published. Written counters advance only after the containing `write_all` completes. On failure, unwritten counts include failed buffered rows and queued rows deliberately released during fatal shutdown accounting.
-- Fatal summaries include stable failure-category fields. Initialization and replay-row diagnostics separately include paths, native error values, records, and columns where available.
+- Fatal summaries include stable failure-category fields. `failure.session`
+  reports a concrete code only when the terminal capture failure is attributed
+  to the session or message-policy breaker; recovered and lifecycle results are
+  retained separately as `connections.last_session_result`. Initialization and
+  replay-row diagnostics separately include paths, native error values,
+  records, and columns where available.
 
 For every normal completed run:
 
@@ -833,7 +839,7 @@ Ordered shutdown:
 2. The first `SIGINT` or `SIGTERM` requests this graceful path. The signal wait remains armed while the I/O context runs; later signals increment the repeated-stop counter and call the same idempotent stop entry point. They do not call `abort`, `_Exit`, or bypass writer accounting.
 3. Cancel duration, reconnect, resolve, and connection timers.
 4. Stop initiating new reads or replay records.
-5. If a WebSocket session is active and the transport permits it, initiate an asynchronous close handshake with the two-second deadline; otherwise cancel/close the lowest layer.
+5. If a WebSocket session is active and the transport permits it, initiate an asynchronous close handshake with the two-second deadline; otherwise cancel/close the lowest layer. Once an explicit stop is active, a peer-side close-handshake failure is retained as `connections.last_session_result=close_failure` but is not fatal: local transport teardown and checked writer drain still complete. Callback failures and close failures outside this lifecycle context remain fatal.
 6. Through the session terminal gate, wait until every producer callback has either completed or returned as stale/cancelled and no callback can enqueue another batch.
 7. Close the writer queue.
 8. Drain queued batches, flush and close every file.

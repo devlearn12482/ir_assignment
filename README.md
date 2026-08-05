@@ -405,7 +405,7 @@ decimal integers or stable enum strings. Important groups are:
 |---|---|
 | `run.*` | mode, final status/exit code, stop source, and signal counts |
 | `source.*` | complete live messages or replay rows read |
-| `connections.*` | attempts, successful sessions, reconnects, recoverable failures |
+| `connections.*` | attempts, successful sessions, reconnects, recoverable failures, last observed session result |
 | `events.*` | pre-audit reasons, accepted/schema events, book outcomes, trades |
 | `writer.*` | rows enqueued, written, and provably left unwritten |
 | `policy.*` | binary/oversized messages and breaker trips |
@@ -443,10 +443,16 @@ METRICS_END
 ```
 
 `policy.binary_messages` is a diagnostic subcounter already included once in
-`events.pre_audit_rejections`. On orderly duration/signal shutdown,
-`failure.session=none`; the internal socket cancellation is lifecycle state,
-not reported as a failure. Fatal writer runs retain enqueued/written/unwritten
-counts instead of claiming the success equalities.
+`events.pre_audit_rejections`. `connections.last_session_result` preserves the
+last observed session outcome, including a recovered error or orderly
+cancellation. `failure.session` is non-`none` only when the terminal capture
+failure is attributed to the session or the message-policy breaker; therefore
+every successful duration, signal, or reconnect-backoff stop reports
+`failure.session=none`. If the peer does not complete its close handshake after
+an explicit stop, `connections.last_session_result=close_failure` records that
+diagnostic while checked writer drain still determines capture success. Fatal
+writer runs retain enqueued/written/unwritten counts instead of claiming the
+success equalities.
 
 ## Tests and review evidence
 
