@@ -119,3 +119,83 @@ jobs:
 
           cmake --build build-sanitize --target tests --parallel
           ./build-sanitize/tests/unit_tests
+
+      - name: Run native public Binance live smoke
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          PATH=/usr/bin:/bin
+          export PATH
+
+          output_dir="${RUNNER_TEMP}/binance-live-smoke"
+          metrics_file="${RUNNER_TEMP}/binance-live-smoke.metrics"
+
+          cmake --build build-strict --target binance_capture --parallel
+          ./build-strict/binance_capture \
+            --venue spot \
+            --symbols BTCUSDT \
+            --duration 15 \
+            --output-dir "${output_dir}" \
+            2>"${metrics_file}"
+
+          mapfile -t audit_files < <(
+            find "${output_dir}" -maxdepth 1 -type f \
+              -name 'market_data_spot_BTCUSDT_*.csv' \
+              ! -name '*_orderbook.csv'
+          )
+          mapfile -t book_files < <(
+            find "${output_dir}" -maxdepth 1 -type f \
+              -name 'market_data_spot_BTCUSDT_*_orderbook.csv'
+          )
+          test "${#audit_files[@]}" -eq 1
+          test "${#book_files[@]}" -eq 1
+
+          audit_file="${audit_files[0]}"
+          book_file="${book_files[0]}"
+          audit_header='recv_tsec,recv_tnsec,venue,stream_kind,shard_id,conn_epoch,conn_seq,symbol,payload_json'
+          book_header='tsec,tnsec,seqNo,id,type,side,bid0,bid1,bid2,bid3,bid4,bid_size0,bid_size1,bid_size2,bid_size3,bid_size4,ask0,ask1,ask2,ask3,ask4,ask_size0,ask_size1,ask_size2,ask_size3,ask_size4'
+
+          test "$(head -n 1 "${audit_file}")" = "${audit_header}"
+          test "$(head -n 1 "${book_file}")" = "${book_header}"
+
+          audit_rows=$(( $(wc -l < "${audit_file}") - 1 ))
+          book_rows=$(( $(wc -l < "${book_file}") - 1 ))
+          test "${audit_rows}" -gt 0
+          test "${book_rows}" -gt 0
+          awk -F, '
+            NR == 2 { found = 1; if (NF != 26) exit 1 }
+            END { if (!found) exit 1 }
+          ' "${book_file}"
+
+          cut -d, -f4 "${audit_file}" | tail -n +2 | sort -u \
+            >"${RUNNER_TEMP}/binance-live-smoke.streams"
+          grep -qx depth_diff "${RUNNER_TEMP}/binance-live-smoke.streams"
+          grep -qx depth5 "${RUNNER_TEMP}/binance-live-smoke.streams"
+          grep -qx trade "${RUNNER_TEMP}/binance-live-smoke.streams"
+
+          metric() {
+            awk -F= -v key="$1" '$1 == key { print $2 }' "${metrics_file}"
+          }
+
+          test "$(metric run.status)" = success
+          test "$(metric run.exit_code)" -eq 0
+          test "$(metric source.complete_messages)" -eq "${audit_rows}"
+          test "$(metric events.pre_audit_rejections)" -eq 0
+          test "$(metric events.schema_rejections)" -eq 0
+          test "$(metric events.sequence_gaps)" -eq 0
+          test "$(metric events.crossed_books)" -eq 0
+          test "$(metric writer.audit_rows_written)" -eq "${audit_rows}"
+          test "$(metric writer.audit_rows_unwritten)" -eq 0
+          test "$(metric writer.book_rows_written)" -eq "${book_rows}"
+          test "$(metric writer.book_rows_unwritten)" -eq 0
+          test "$(metric failure.capture)" = none
+          test "$(metric failure.control)" = none
+          test "$(metric failure.session)" = none
+          test "$(metric failure.writer)" = none
+
+          printf 'native_live_audit_rows=%s\n' "${audit_rows}"
+          printf 'native_live_book_rows=%s\n' "${book_rows}"
+          sha256sum "${audit_file}" "${book_file}"
+          cat "${metrics_file}"
