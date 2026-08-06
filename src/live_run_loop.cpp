@@ -221,6 +221,12 @@ void LiveRunLoop::on_capture_terminal(
     }
     impl_->terminal_started = true;
     impl_->result.capture = result;
+    if (impl_->result.error == LiveRunLoopErrorCode::none &&
+        impl_->result.duration_expired && result.success() &&
+        result.metrics.successful_connections == 0U) {
+        impl_->result.error =
+            LiveRunLoopErrorCode::no_successful_connection;
+    }
     impl_->result.terminal = true;
     boost::system::error_code ignored;
     impl_->duration_timer.cancel(ignored);

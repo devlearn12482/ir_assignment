@@ -20,6 +20,7 @@ enum class LiveRunLoopErrorCode : std::uint8_t {
     none,
     signal_wait_failure,
     duration_wait_failure,
+    no_successful_connection,
     stop_request_failure,
 };
 
@@ -99,6 +100,8 @@ private:
             return "signal_wait_failure";
         case LiveRunLoopErrorCode::duration_wait_failure:
             return "duration_wait_failure";
+        case LiveRunLoopErrorCode::no_successful_connection:
+            return "no_successful_connection";
         case LiveRunLoopErrorCode::stop_request_failure:
             return "stop_request_failure";
     }

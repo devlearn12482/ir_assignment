@@ -117,7 +117,12 @@ symbol subscribes to:
 Omit `--duration` to run until `SIGINT`, `SIGTERM`, or a fatal error. Duration
 is measured with `std::chrono::steady_clock` from run-loop start. A signal or
 duration expiry enters the same idempotent asynchronous stop path; repeated
-signals request the same orderly stop rather than aborting the process.
+signals request the same orderly stop rather than aborting the process. A
+duration-bounded run that reaches its deadline without ever opening a
+WebSocket session drains and closes its output files but returns processing
+exit code 5 with `failure.control=no_successful_connection`; it is not
+reported as a successful empty capture. An operator-requested signal before
+the first open session remains an orderly cancellation.
 
 The fixed production combined-stream endpoints are:
 
@@ -511,7 +516,9 @@ handshake after an explicit stop, `connections.last_session_result` records
 capture success. These close-stage lifecycle outcomes do not increment
 `connections.recoverable_failures`; no reconnect is attempted after stopping.
 Fatal writer runs retain enqueued/written/unwritten counts instead of claiming
-the success equalities.
+the success equalities. A duration expiry with
+`connections.successful=0` reports `run.status=fatal`, `run.exit_code=5`, and
+`failure.control=no_successful_connection` after checked writer drain.
 
 ## Tests and review evidence
 

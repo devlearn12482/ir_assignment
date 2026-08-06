@@ -66,6 +66,7 @@ enum class Scenario : std::uint8_t {
     live_controller_binary_breaker,
     live_controller_tls_retry,
     live_run_loop_duration,
+    live_run_loop_duration_no_success,
     live_run_loop_signal,
     live_run_loop_repeated_signals,
 };
@@ -105,6 +106,8 @@ struct ControllerOutcome {
     std::uint64_t signals_received{0U};
     std::uint64_t repeated_signals{0U};
     bool duration_expired{false};
+    hft::LiveRunLoopErrorCode run_error{
+        hft::LiveRunLoopErrorCode::none};
     std::string audit_bytes{};
     std::string book_bytes{};
 };
@@ -169,7 +172,9 @@ void run_server(
         context.use_private_key_file(
             private_key_file, ssl::context::pem);
 
-        if (scenario == Scenario::live_controller_tls_retry) {
+        if (scenario == Scenario::live_controller_tls_retry ||
+            scenario ==
+                Scenario::live_run_loop_duration_no_success) {
             Tcp::socket failed_socket{io_context};
             boost::system::error_code failed_error;
             acceptor.accept(failed_socket, failed_error);
@@ -182,6 +187,10 @@ void run_server(
             failed_socket.shutdown(
                 Tcp::socket::shutdown_both, failed_error);
             failed_socket.close(failed_error);
+            if (scenario ==
+                Scenario::live_run_loop_duration_no_success) {
+                return;
+            }
         }
 
         if (scenario == Scenario::live_controller_reconnect ||
@@ -511,6 +520,7 @@ void run_server(
             case Scenario::live_controller_reconnect:
             case Scenario::live_controller_stop_backoff:
             case Scenario::live_controller_binary_breaker:
+            case Scenario::live_run_loop_duration_no_success:
                 return;
         }
     } catch (const std::exception& error) {
@@ -562,8 +572,12 @@ ControllerOutcome run_controller_client(
     const std::string book_path{
         output->order_book_path(0U)};
 
-    const bool managed_run_loop =
+    const bool duration_run =
         scenario == Scenario::live_run_loop_duration ||
+        scenario ==
+            Scenario::live_run_loop_duration_no_success;
+    const bool managed_run_loop =
+        duration_run ||
         scenario == Scenario::live_run_loop_signal ||
         scenario == Scenario::live_run_loop_repeated_signals;
     hft::LiveRunLoopCreateError loop_error;
@@ -572,7 +586,7 @@ ControllerOutcome run_controller_client(
     if (managed_run_loop) {
         run_loop = hft::LiveRunLoop::create(
             io_context,
-            scenario == Scenario::live_run_loop_duration
+            duration_run
                 ? std::optional<std::uint64_t>{1U}
                 : std::nullopt,
             loop_error);
@@ -591,9 +605,13 @@ ControllerOutcome run_controller_client(
             };
     }
     hft::LiveReconnectOptions reconnect_options;
-    reconnect_options.initial_backoff =
+    const bool long_reconnect_backoff =
         scenario ==
-                Scenario::live_controller_stop_backoff
+            Scenario::live_controller_stop_backoff ||
+        scenario ==
+            Scenario::live_run_loop_duration_no_success;
+    reconnect_options.initial_backoff =
+        long_reconnect_backoff
             ? std::chrono::milliseconds{2'000}
             : std::chrono::milliseconds{10};
     reconnect_options.maximum_backoff =
@@ -690,6 +708,7 @@ ControllerOutcome run_controller_client(
             run_loop->result().repeated_signals;
         outcome.duration_expired =
             run_loop->result().duration_expired;
+        outcome.run_error = run_loop->result().error;
     }
     outcome.controller_released = weak_controller.expired();
     if (outcome.terminal_called) {
@@ -889,6 +908,8 @@ bool run_case(
         scenario ==
             Scenario::live_controller_tls_retry ||
         scenario == Scenario::live_run_loop_duration ||
+        scenario ==
+            Scenario::live_run_loop_duration_no_success ||
         scenario == Scenario::live_run_loop_signal ||
         scenario == Scenario::live_run_loop_repeated_signals) {
         controller_outcome =
@@ -905,7 +926,9 @@ bool run_case(
                   << reason << '\n';
         success = false;
     };
-    if (!server_outcome.websocket_accepted) {
+    if (!server_outcome.websocket_accepted &&
+        scenario !=
+            Scenario::live_run_loop_duration_no_success) {
         fail("server did not accept WebSocket");
     }
     if (!server_outcome.error.empty()) {
@@ -920,6 +943,8 @@ bool run_case(
         scenario !=
             Scenario::live_controller_tls_retry &&
         scenario != Scenario::live_run_loop_duration &&
+        scenario !=
+            Scenario::live_run_loop_duration_no_success &&
         scenario != Scenario::live_run_loop_signal &&
         scenario != Scenario::live_run_loop_repeated_signals &&
         !client_outcome.opened) {
@@ -934,6 +959,8 @@ bool run_case(
         scenario !=
             Scenario::live_controller_tls_retry &&
         scenario != Scenario::live_run_loop_duration &&
+        scenario !=
+            Scenario::live_run_loop_duration_no_success &&
         scenario != Scenario::live_run_loop_signal &&
         scenario != Scenario::live_run_loop_repeated_signals &&
         !client_outcome.terminal_called) {
@@ -1300,6 +1327,33 @@ bool run_case(
                 fail("failed TLS attempt consumed epoch or sequence");
             }
             break;
+        case Scenario::live_run_loop_duration_no_success:
+            if (!controller_outcome.created ||
+                controller_outcome.create_error ||
+                !controller_outcome.terminal_called ||
+                !controller_outcome.controller_released ||
+                !controller_outcome.terminal.success() ||
+                !controller_outcome.duration_expired ||
+                controller_outcome.run_error !=
+                    hft::LiveRunLoopErrorCode::
+                        no_successful_connection ||
+                controller_outcome.terminal.metrics.
+                        connection_attempts != 1U ||
+                controller_outcome.terminal.metrics.
+                        successful_connections != 0U ||
+                controller_outcome.terminal.metrics.
+                        reconnects_scheduled != 1U ||
+                controller_outcome.terminal.metrics.
+                        recoverable_session_failures != 1U ||
+                controller_outcome.terminal.writer.metrics.
+                        audit_rows_written != 0U ||
+                controller_outcome.terminal.writer.metrics.
+                        order_book_rows_written != 0U) {
+                fail(
+                    "duration without an open session was not "
+                    "classified as a failed run");
+            }
+            break;
         case Scenario::live_run_loop_duration:
         case Scenario::live_run_loop_signal:
         case Scenario::live_run_loop_repeated_signals: {
@@ -1312,7 +1366,9 @@ bool run_case(
                 controller_outcome.create_error ||
                 !controller_outcome.terminal_called ||
                 !controller_outcome.controller_released ||
-                !controller_outcome.terminal.success()) {
+                !controller_outcome.terminal.success() ||
+                controller_outcome.run_error !=
+                    hft::LiveRunLoopErrorCode::none) {
                 fail("managed run loop did not stop and drain cleanly");
                 break;
             }
@@ -1393,6 +1449,9 @@ int main(const int argc, const char* const* const argv) {
     run(
         Scenario::live_run_loop_duration,
         "live-run-loop-duration");
+    run(
+        Scenario::live_run_loop_duration_no_success,
+        "live-run-loop-duration-no-success");
     run(
         Scenario::live_run_loop_signal,
         "live-run-loop-signal");

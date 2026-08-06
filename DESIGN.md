@@ -828,6 +828,7 @@ Rules:
 - DNS, TCP/TLS/WebSocket handshakes, reconnect backoff, and disconnected intervals consume the duration budget.
 - When the deadline expires, no new read is initiated and normal ordered shutdown begins.
 - Queue draining and final file flush may make process exit occur slightly after the requested duration; this tail is reported separately and is not counted as capture time.
+- If the deadline expires before any WebSocket session reaches the open state, checked shutdown still drains and closes the header-only outputs, but the run terminates with processing exit code 5 and `failure.control=no_successful_connection`. A signal-requested stop before the first open session remains an orderly operator cancellation.
 - Replay rejects `--duration` because end-of-input defines its run boundary.
 
 ## 16. Shutdown behavior
@@ -851,7 +852,7 @@ Ordered shutdown:
 8. Drain queued batches, flush and close every file.
 9. If a write, flush, or close fails during step 8, latch fatal status and preserve the first error context. Stop normal writes, count every buffered or queued audit/book row that remains unwritten, release all queue slots so shutdown cannot deadlock, and best-effort flush/close unaffected handles. A failed drain is never reported as orderly.
 10. Join the writer thread.
-11. Cancel the signal wait, print final metrics including enqueued/written/unwritten counts, and return zero only if capture/replay and the complete writer drain succeeded. Any latched writer error forces a nonzero result.
+11. Cancel the signal wait, apply the duration-completion policy, and print final metrics including enqueued/written/unwritten counts. Return zero only if capture/replay and the complete writer drain succeeded and a duration-bounded live run opened at least one WebSocket session. Any latched writer error or `no_successful_connection` outcome forces a nonzero result.
 
 A successful orderly shutdown guarantees that every accepted row was passed completely to the kernel and every descriptor was checked and closed. It does not guarantee persistence across an operating-system crash or power loss because the baseline deliberately does not call `fsync` or `fdatasync`.
 

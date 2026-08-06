@@ -40,10 +40,19 @@ void test_duration_validation(Context& context) {
         "run loop rejects duration conversion overflow");
 }
 
+void test_terminal_policy_metric_name(Context& context) {
+    context.expect(
+        to_string(
+            LiveRunLoopErrorCode::no_successful_connection) ==
+            "no_successful_connection",
+        "no-successful-connection policy has a stable metric name");
+}
+
 }  // namespace
 
 void run_live_run_loop_tests(Context& context) {
     test_duration_validation(context);
+    test_terminal_policy_metric_name(context);
 }
 
 }  // namespace hft::test
