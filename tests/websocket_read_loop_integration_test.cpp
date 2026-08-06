@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <csignal>
 #include <cstddef>
@@ -26,6 +27,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <iterator>
 #include <memory>
@@ -47,6 +49,7 @@ using Tcp = asio::ip::tcp;
 constexpr char kFragmentedPayload[]{
     R"({"stream":"btcusdt@trade","data":{"p":"1.25"}})"};
 constexpr char kPingPayload[]{"probe-42"};
+constexpr char kStopReadyPingPayload[]{"stop-ready"};
 
 enum class Scenario : std::uint8_t {
     fragmented_text_with_ping,
@@ -77,6 +80,10 @@ struct ServerOutcome {
     std::uint32_t pong_count{0};
     std::uint32_t websocket_accept_count{0};
     bool websocket_accepted{false};
+};
+
+struct ScenarioSynchronization {
+    std::atomic<bool> stop_ready{false};
 };
 
 struct ClientOutcome {
@@ -162,7 +169,8 @@ void run_server(
     const std::string& certificate_file,
     const std::string& private_key_file,
     const Scenario scenario,
-    ServerOutcome& outcome) noexcept {
+    ServerOutcome& outcome,
+    ScenarioSynchronization& synchronization) noexcept {
     try {
         asio::io_context& io_context =
             static_cast<asio::io_context&>(
@@ -250,6 +258,15 @@ void run_server(
                 }
                 outcome.websocket_accepted = true;
                 ++outcome.websocket_accept_count;
+                reconnect_stream.control_callback(
+                    [&](const websocket::frame_type kind,
+                        const beast::string_view payload) {
+                        if (kind == websocket::frame_type::pong &&
+                            payload == kStopReadyPingPayload) {
+                            synchronization.stop_ready.store(
+                                true, std::memory_order_release);
+                        }
+                    });
                 if (scenario ==
                     Scenario::live_controller_binary_breaker) {
                     constexpr char binary_payload[]{"binary"};
@@ -273,6 +290,20 @@ void run_server(
                 if (scenario ==
                     Scenario::live_controller_binary_breaker) {
                     continue;
+                }
+                if (scenario ==
+                        Scenario::live_controller_reconnect &&
+                    index + 1U == connection_count) {
+                    reconnect_stream.ping(
+                        websocket::ping_data{
+                            kStopReadyPingPayload},
+                        reconnect_error);
+                    if (reconnect_error) {
+                        outcome.error =
+                            "reconnect readiness ping: " +
+                            reconnect_error.message();
+                        return;
+                    }
                 }
                 if (index == 0U) {
                     reconnect_stream.close(
@@ -327,6 +358,10 @@ void run_server(
                     ++outcome.pong_count;
                     outcome.pong_payload.assign(
                         payload.data(), payload.size());
+                    if (payload == kStopReadyPingPayload) {
+                        synchronization.stop_ready.store(
+                            true, std::memory_order_release);
+                    }
                 }
             });
 
@@ -498,6 +533,15 @@ void run_server(
                         return;
                     }
                 }
+                stream.ping(
+                    websocket::ping_data{kStopReadyPingPayload},
+                    error);
+                if (error) {
+                    outcome.error =
+                        "controller readiness ping: " +
+                        error.message();
+                    return;
+                }
                 beast::flat_buffer buffer;
                 stream.read(buffer, error);
                 return;
@@ -510,6 +554,15 @@ void run_server(
                 if (error) {
                     outcome.error =
                         "post-TLS-retry message write: " +
+                        error.message();
+                    return;
+                }
+                stream.ping(
+                    websocket::ping_data{kStopReadyPingPayload},
+                    error);
+                if (error) {
+                    outcome.error =
+                        "post-TLS-retry readiness ping: " +
                         error.message();
                     return;
                 }
@@ -533,7 +586,8 @@ void run_server(
 ControllerOutcome run_controller_client(
     const std::uint16_t port,
     const std::string& ca_file,
-    const Scenario scenario) {
+    const Scenario scenario,
+    ScenarioSynchronization& synchronization) {
     asio::io_context io_context;
     ControllerOutcome outcome;
     TemporaryDirectory parent;
@@ -650,51 +704,86 @@ ControllerOutcome run_controller_client(
         weak_controller{controller};
 
     asio::steady_timer stop_timer{io_context};
+    const bool readiness_gated_stop =
+        scenario == Scenario::live_controller ||
+        scenario == Scenario::live_controller_reconnect ||
+        scenario == Scenario::live_controller_tls_retry ||
+        scenario == Scenario::live_run_loop_signal ||
+        scenario == Scenario::live_run_loop_repeated_signals;
+    std::uint32_t readiness_polls{0U};
+    bool readiness_settled{
+        scenario != Scenario::live_controller_reconnect};
+    std::function<void(const boost::system::error_code&)>
+        wait_for_readiness;
+    wait_for_readiness =
+        [&](const boost::system::error_code& error) {
+            if (error) {
+                return;
+            }
+            if (!synchronization.stop_ready.load(
+                    std::memory_order_acquire) &&
+                ++readiness_polls < 1'000U) {
+                stop_timer.expires_after(
+                    std::chrono::milliseconds{10});
+                stop_timer.async_wait(wait_for_readiness);
+                return;
+            }
+            if (!readiness_settled) {
+                readiness_settled = true;
+                stop_timer.expires_after(
+                    std::chrono::milliseconds{150});
+                stop_timer.async_wait(wait_for_readiness);
+                return;
+            }
+            if (scenario == Scenario::live_run_loop_signal ||
+                scenario ==
+                    Scenario::live_run_loop_repeated_signals) {
+                static_cast<void>(std::raise(SIGINT));
+                if (scenario ==
+                    Scenario::live_run_loop_repeated_signals) {
+                    static_cast<void>(std::raise(SIGTERM));
+                }
+                return;
+            }
+            if (const auto owner = weak_controller.lock()) {
+                owner->stop();
+            }
+        };
+    const auto arm_readiness_stop = [&] {
+        stop_timer.expires_after(std::chrono::milliseconds{10});
+        stop_timer.async_wait(wait_for_readiness);
+    };
     if (managed_run_loop) {
         if (!run_loop->attach_controller(controller)) {
             return outcome;
         }
-        if (scenario == Scenario::live_run_loop_signal ||
-            scenario ==
-                Scenario::live_run_loop_repeated_signals) {
+        if (readiness_gated_stop) {
+            arm_readiness_stop();
+        }
+        run_loop->start();
+    } else {
+        if (readiness_gated_stop) {
+            arm_readiness_stop();
+        } else {
             stop_timer.expires_after(
-                std::chrono::milliseconds{100});
+                scenario ==
+                        Scenario::live_controller_stop_backoff
+                    ? std::chrono::milliseconds{300}
+                    : (scenario ==
+                               Scenario::live_controller_binary_breaker
+                           ? std::chrono::milliseconds{500}
+                           : std::chrono::seconds{1}));
             stop_timer.async_wait(
-                [scenario](
+                [weak_controller](
                     const boost::system::error_code& error) {
                     if (!error) {
-                        static_cast<void>(std::raise(SIGINT));
-                        if (scenario == Scenario::
-                                            live_run_loop_repeated_signals) {
-                            static_cast<void>(std::raise(SIGTERM));
+                        if (const auto owner =
+                                weak_controller.lock()) {
+                            owner->stop();
                         }
                     }
                 });
         }
-        run_loop->start();
-    } else {
-        stop_timer.expires_after(
-            scenario ==
-                    Scenario::live_controller_reconnect ||
-                scenario ==
-                    Scenario::live_controller_stop_backoff ||
-                scenario ==
-                    Scenario::live_controller_tls_retry
-                ? std::chrono::milliseconds{300}
-                : (scenario ==
-                           Scenario::live_controller_binary_breaker
-                       ? std::chrono::milliseconds{500}
-                       : std::chrono::seconds{1}));
-        stop_timer.async_wait(
-            [weak_controller](
-                const boost::system::error_code& error) {
-                if (!error) {
-                    if (const auto owner =
-                            weak_controller.lock()) {
-                        owner->stop();
-                    }
-                }
-            });
         controller->start();
     }
     controller.reset();
@@ -888,6 +977,7 @@ bool run_case(
     const std::uint16_t port =
         acceptor.local_endpoint().port();
     ServerOutcome server_outcome;
+    ScenarioSynchronization synchronization;
     std::thread server{
         [&] {
             run_server(
@@ -895,7 +985,8 @@ bool run_case(
                 certificate_file,
                 private_key_file,
                 scenario,
-                server_outcome);
+                server_outcome,
+                synchronization);
         }};
     ClientOutcome client_outcome;
     ControllerOutcome controller_outcome;
@@ -913,7 +1004,8 @@ bool run_case(
         scenario == Scenario::live_run_loop_signal ||
         scenario == Scenario::live_run_loop_repeated_signals) {
         controller_outcome =
-            run_controller_client(port, ca_file, scenario);
+            run_controller_client(
+                port, ca_file, scenario, synchronization);
     } else {
         client_outcome =
             run_client(port, ca_file, scenario);
@@ -1184,6 +1276,10 @@ bool run_case(
                 fail("reconnected controller did not drain cleanly");
                 break;
             }
+            // The first session may cross the test's 100 ms stability
+            // threshold under load. The readiness barrier deliberately
+            // keeps the second session open long enough to require at least
+            // one reset; no session may reset the backoff more than once.
             if (controller_outcome.terminal.metrics.
                         connection_attempts != 2U ||
                 controller_outcome.terminal.metrics.
@@ -1195,7 +1291,11 @@ bool run_case(
                 controller_outcome.terminal.metrics.
                         last_reconnect_delay_ms != 5U ||
                 controller_outcome.terminal.metrics.
-                        backoff_resets != 1U ||
+                        backoff_resets == 0U ||
+                controller_outcome.terminal.metrics.
+                        backoff_resets >
+                    controller_outcome.terminal.metrics.
+                        successful_connections ||
                 controller_outcome.terminal.metrics.
                         text_messages != 2U ||
                 controller_outcome.terminal.metrics.
