@@ -579,8 +579,7 @@ tracked files for private-key headers and forbidden filenames. Public Binance
 market data requires no credentials or `.env` file.
 
 The detailed ownership, parser-lifetime, sequencing, reconnect, and failure
-contracts are in [DESIGN.md](DESIGN.md). The assignment extraction and
-resolved ambiguities are in [ASSIGNMENT_NOTES.md](ASSIGNMENT_NOTES.md).
+contracts are in [DESIGN.md](DESIGN.md).
 
 ## How to Submit on GitHub
 
