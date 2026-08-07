@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 
 project(
     binance_market_data
-    VERSION 0.1.0
+    VERSION 1.0.0
     DESCRIPTION "Deterministic Binance market-data capture and partial order book"
     LANGUAGES CXX
 )
