@@ -70,7 +70,7 @@ jobs:
           cmake --build build --target tests
           ./build/tests/unit_tests
 
-      - name: Run reviewer clean-build command
+      - name: Run clean default build command
         shell: bash
         run: |
           set -euo pipefail
