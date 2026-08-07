@@ -335,48 +335,44 @@ tsec,tnsec,seqNo,id,type,side,bid0,bid1,bid2,bid3,bid4,bid_size0,bid_size1,bid_s
 
 ### Ubuntu 22.04 target validation
 
-On 2026-08-05 UTC, commit `6efbb834e1d59315da5a9636068e438cb3a9b0e1`
-was cloned into the Linux filesystem of a fresh Ubuntu 22.04.5 LTS WSL2
-distribution. The environment used GCC 12.3.0, CMake 3.22.1, Ninja 1.10.1,
-Boost 1.74, and OpenSSL 3.0.2. Binance accepted a direct WebSocket upgrade
-from that host with HTTP 101. The PDF Release build completed without
-warnings, and all seven registered tests passed.
+On 2026-08-06 UTC, commit `5f2038cb6eed57c892f52cc3268ad7fe569b35b2`
+was cloned into a dedicated Oracle VirtualBox guest running Ubuntu Server
+22.04.5 LTS with the Ubuntu 5.15.0-187-generic x86-64 kernel. This is a full
+Linux VM, not WSL or a container. The environment used default GCC 11.4.0,
+GCC 12.3.0, CMake 3.22.1, Ninja 1.10.1, Boost 1.74, and OpenSSL 3.0.2.
 
-The reviewer-checklist Spot command was then run with `BTCUSDT` for 300
-seconds. One verified connection processed 12,837 messages: 3,052
-`depth_diff`, 3,052 `depth5`, and 6,733 `trade` events. It wrote all 12,837
-audit rows and 3,052 book rows with zero reconnects, pre-audit or schema
-rejections, sequence gaps, crossed books, backpressure pauses, or unwritten
-rows. Every book data row had 26 columns, `seqNo` covered 1 through 3,052,
-and `conn_seq` covered 1 through 12,837 in epoch 0. In this particular
-one-symbol interleaving, every differential update followed an equal or newer
-`depth5` update ID and was correctly classified as stale; the two-symbol run
-below exercised applied Spot differentials.
+From that clean checkout, the PDF GCC 12 Release commands completed without
+warnings and all seven registered tests passed. Separate clean builds also
+passed with the default GCC 11 reviewer command, GCC 12 strict warnings as
+errors, and GCC 12 ASan/UBSan with leak detection. Fixture hashes passed, and
+replay under `strace -f -e trace=network` made zero network system calls.
 
-Offline replay consumed all 12,837 audit rows and regenerated all 3,052 book
-rows byte-for-byte. The captured audit SHA-256 was
-`118dd0710cd307ec8f527b302996d3709e96ae5d39d4e5f7737803c6b1600000`;
-the live and replayed book SHA-256 was
-`157ea9059c1eee2d0e8c01cc57b5f90a206b9a53339d23863303f7ba7a4a8199`.
+Three location-allowed live checks used the same native Ubuntu guest:
 
-Two additional 30-second live checks used the same build and network path:
+- A 120-second Spot `BTCUSDT` run processed and wrote 4,150 audit events:
+  862 `depth5`, 860 differential-depth, and 2,428 trade messages. One
+  recoverable transport failure caused a successful reconnect and exercised
+  epochs 0 and 1. The run wrote 862 book rows with no pre-audit/schema
+  rejection, sequence gap, crossed book, backpressure event, or unwritten
+  row. Replay regenerated the book byte-for-byte with SHA-256
+  `98341f14e6e5b80eb1ba88748592955af31c4f7f52e7f21d117b311d82ec0f6e`.
+- A 30-second USD-M `BTCUSDT` run processed 1,017 events and wrote 541 book
+  rows: 254 refreshes, 287 applied differentials, and 476 audited trades. It
+  had no sequence gap, schema failure, crossed book, backpressure event, or
+  unwritten row. Replay was byte-identical with SHA-256
+  `927243dcbd935b59a9aa4397dcec775bfb7c246dc922744396212d5f4e010836`.
+- A 30-second Spot `BTCUSDT,ETHUSDT` run processed 2,032 events on one
+  connection (`shard_id=0`) and wrote independent per-symbol audit/book
+  pairs. It applied 587 refreshes and 292 differentials with no sequence gap,
+  schema failure, crossed book, backpressure event, or unwritten row. Replay
+  regenerated both books byte-for-byte; the BTCUSDT and ETHUSDT SHA-256 values
+  were `ce8825747d73025a1710d6fdba468463d683e67e2e96c4282a10dfd750e12a3b`
+  and `2b58c57d843206308976a71dcab1051f809c027c4bc85442db8e3f993323be59`.
 
-- USD-M `BTCUSDT` processed 1,677 messages on one connection, including 283
-  applied refreshes, 283 applied differentials, and 1,104 trades. Three
-  detected sequence gaps invalidated the partial book and subsequent `depth5`
-  events recovered it as designed. There were no schema, crossed-book,
-  backpressure, or writer failures.
-- Spot `BTCUSDT,ETHUSDT` processed 2,889 messages on one connection and wrote
-  separate audit/book pairs for both symbols. It applied 591 refreshes and
-  294 differentials with zero sequence gaps, schema failures, crossed books,
-  backpressure pauses, or unwritten rows.
-
-Replay regenerated the USD-M book and both two-symbol Spot books
-byte-identically. WSL2 is disclosed because its kernel is virtualized; the
-required native Ubuntu 22.04 GitHub runner independently passes the complete
-build, strict-warning, test, and sanitizer matrix. Public Binance rejects
-that hosted runner's egress with HTTP 451, so location-allowed live evidence
-was collected locally instead.
+The required hosted Ubuntu 22.04 workflow independently passes the PDF build,
+default reviewer build, strict-warning build, and sanitizer matrix. Its public
+Binance live step remains manual because hosted-runner egress may be rejected
+by Binance; live evidence above was collected from the location-allowed VM.
 
 ## Threading, I/O, and resource policy
 
