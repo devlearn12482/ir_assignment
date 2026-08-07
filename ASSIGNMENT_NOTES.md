@@ -2,9 +2,57 @@
 
 Source reviewed: `Operations Tech Lead - Assignment.pdf` (6 pages).
 
-Working scope decision: the optional stretch tasks are not required for this submission. They are retained below only as a faithful record of the source document and should not be implemented unless the user later changes scope. The baseline will support multiple configured symbols on one combined WebSocket connection (`shard_id=0`), with independent per-symbol books and outputs. Distributing symbols across multiple WebSocket connections (multi-connection sharding) remains optional stretch work.
+Audit method: every page was rendered and visually inspected, then its text was
+extracted independently and reconciled with the tables, commands, and headings.
+This matters because the order-book header is clipped in the page rendering;
+the complete header is established by the column-semantics table and the
+explicit 26-column acceptance check.
+
+How to read these notes:
+
+- **PDF requirement** means the document directly requires the behavior or
+  submission evidence.
+- **Reviewer focus** means it is not a separate functional acceptance row, but
+  the document says reviewers will inspect and score evidence for it in code,
+  build flags, or the README.
+- **Conditional** means it applies only if the feature is supplied, most
+  notably replay mode.
+- **Optional stretch** means it is explicitly outside the required baseline.
+- **Working implementation decision** or **external documentation detail** is
+  additional project guidance, not wording that should be attributed directly
+  to the PDF.
+
+Working scope decision: the optional stretch tasks are not required for this submission. They are retained below only as a faithful record of the source document and should not be implemented unless submission scope is deliberately expanded. The baseline will support multiple configured symbols on one combined WebSocket connection (`shard_id=0`), with independent per-symbol books and outputs. Distributing symbols across multiple WebSocket connections (multi-connection sharding) remains optional stretch work.
 
 Working safety limit: accept at most 32 configured symbols on the baseline connection (96 subscribed streams) and reject a constructed WebSocket target longer than 8192 bytes. Fail fast with a clear configuration error instead of silently dropping or partially subscribing symbols.
+
+### Page-by-page completeness index
+
+| PDF page | Material recorded in these notes |
+|---:|---|
+| 1 | Task objective, language, three required streams, official references, Spot/USD-M combined URLs, lowercase stream names, Deliverable A naming and CSV rules |
+| 2 | All nine market-data columns, time and ordering policy, Deliverable B emission rule, exact 26-column header, all order-book field types and meanings |
+| 3 | Snapshot timestamps, deterministic integer scaling, reconnect/gap documentation, complete submission list, sample artifacts, conditional replay rule, six functional acceptance criteria, first correctness-review items |
+| 4 | Remaining correctness criteria, C++ quality, explicitly prioritized performance/scalability items, observability, security/ops baseline, all three optional stretch items, beginning of GitHub instructions |
+| 5 | Repository initialization, `.gitignore`, credential warning, submission tag, Ubuntu 22.04/GCC 12/C++17 prerequisites and reproducible Release build |
+| 6 | Single-symbol, multi-symbol, and USD-M live commands, output naming, schema checks, test commands, and the four-command reviewer checklist |
+
+### Requirement strength and prioritization
+
+| Classification | Items |
+|---|---|
+| Functional baseline | Live combined-stream capture; all three streams; exact audit CSV; chronological local top-five book; exact snapshot CSV; deterministic scaling/timestamps; documented reconnect/sequence/epoch behavior |
+| Baseline review evidence | Correct market-data semantics, C++/RAII quality, warnings and Release build, metrics, replay usefulness, TLS verification, secrets hygiene, and bounded configuration |
+| Explicitly prioritized by the PDF | Performance and scalability: JSON parsing, allocations, top-five update complexity, I/O/back-pressure, and threading boundaries |
+| Conditional | If replay is provided, it must read the program's own audit CSV, reproduce the order book without network calls, and say so in the README |
+| Optional stretch, excluded from current scope | REST snapshot plus buffered-diff resynchronization; multi-connection symbol sharding; formal performance notes |
+
+The phrase **“Performance & scalability (prioritize these)”** is the document's
+only direct prioritization instruction. Correctness is still acceptance-critical:
+performance work cannot compensate for an incorrect CSV contract, book, or
+sequence policy. “Performance notes” being stretch does not make the preceding
+performance/scalability review section optional; reviewers are told to probe
+those implementation choices.
 
 ## 1. Assignment objective and scope
 
@@ -198,26 +246,43 @@ tsec,tnsec,seqNo,id,type,side,bid0,bid1,bid2,bid3,bid4,bid_size0,bid_size1,bid_s
 
 ### 6.2 README contents
 
-The README must include all of the following:
+The PDF's **What to submit** list directly requires the README to include:
 
 - Compiler.
 - C++ standard.
 - Dependencies.
 - Complete build commands.
 - Exact CLI invocation that produces both CSV outputs.
-- A `--duration <seconds>` CLI option compatible with the document's reviewer command, which performs a bounded 300-second capture.
 - Symbol-list format.
 - Price and quantity scaling policies.
 - Timestamp policy.
 - Reconnect and gap-handling summary.
 - Brief threading and I/O design note.
-- Venue-specific WebSocket control-frame, connection-lifetime, and reconnect behavior.
-- A short measured performance section even though formal performance notes are listed as optional stretch work; include replay throughput, processing-latency percentiles, and a memory/allocation measure with hardware, compiler flags, dataset size, and method.
+
+Other PDF clauses and reviewer commands make the following README evidence
+necessary or strongly expected:
+
+- A `--duration <seconds>` CLI option compatible with the exact 300-second
+  reviewer command. This flag appears in the reviewer checklist even though it
+  is omitted from the earlier command labeled as a two-minute capture.
 - Chosen market-data file layout/naming if supporting multiple symbols.
 - Instrument-ID derivation.
 - `type` character mapping.
 - Trade handling and whether trade events produce or annotate order-book rows.
-- Replay behavior, including that grading replay makes no network calls if replay mode is provided.
+- Exact CSV schemas and enough explanation to interpret scaled values and
+  missing book levels.
+- Release-build and warning policy evidence.
+- Replay behavior, including that grading replay makes no network calls, **if
+  replay mode is provided**.
+
+Project-selected evidence beyond the PDF's literal README checklist:
+
+- Venue-specific WebSocket control-frame and 24-hour connection-lifetime
+  behavior, because these are operational requirements in the authoritative
+  Binance documentation.
+- A short measured performance section even though formal performance notes
+  are listed as optional stretch work. This is deliberately limited to
+  reviewer evidence rather than adding a stretch runtime feature.
 
 ### 6.3 Sample artifacts
 
@@ -302,11 +367,18 @@ Reviewers will specifically probe CPU consumption and allocation behavior.
 
 ## 12. Security and operations baseline
 
+The PDF directly requires:
+
 - No secrets in the repository.
 - Do not disable TLS verification without a strong justification.
 - Enforce reasonable limits, including maximum URL size and/or shard size, to prevent runaway memory use from bad configuration.
 - Configuration should use environment variables or a `.env.example` containing no real values.
 - Never commit API keys, private keys, credentials, or secret configuration files.
+
+The following are external Binance operational details derived from the
+official references the PDF declares authoritative; they are not additional
+sentences printed in the PDF:
+
 - Treat WebSocket control frames as mainline protocol behavior:
   - Spot sends ping frames approximately every 20 seconds and requires a timely pong carrying the received payload.
   - Current USD-M documentation states a ping every 3 minutes and disconnection if no pong is received within 10 minutes.
@@ -471,10 +543,15 @@ The assignment allows choices in these areas, but every choice must be made cons
 - C++ standard newer than C++17, if selected.
 - Capture duration and shutdown behavior for `--duration <seconds>`.
 - Market-data file organization: one file per symbol/date or one multi-symbol file per run.
+- UTC-date rollover behavior for a capture that crosses midnight; the naming
+  pattern contains a date, but the PDF does not say whether to rotate files.
 - Receive wall-clock versus a named Binance event timestamp.
 - Snapshot-row timestamp source.
 - Fixed price scale and fixed quantity scale.
+- Representation of fewer than five available levels in the fixed 26-column
+  order-book row; the PDF defines the columns but no missing-level sentinel.
 - Instrument-ID derivation.
+- Instrument-ID collision handling across configured symbols.
 - `type` character mapping.
 - `side` assignment for multi-side events and refreshes.
 - Combined-stream routing: derive venue-specific symbol and stream kind from the envelope stream name before parsing the inner payload.
@@ -482,6 +559,10 @@ The assignment allows choices in these areas, but every choice must be made cons
 - `seqNo` scope and initialization.
 - Exact order-book filename derivation.
 - Whether trade events produce order-book rows and whether they alter or only annotate book state.
+- Audit eligibility and counter behavior for malformed envelopes, malformed
+  inner JSON, binary WebSocket messages, and messages that fail venue-schema
+  validation. The PDF requires errors to be logged or counted but does not
+  define rows for these cases.
 - Reset, resync, or drop-until-snapshot behavior after reconnect or a sequence gap.
 - Single-threaded versus multi-threaded pipeline.
 - Blocking/buffered file I/O versus a dedicated writer.
