@@ -14,6 +14,62 @@ sharding and a full end-to-end performance suite are optional stretch work
 and are not implemented; one isolated core benchmark is retained as review
 evidence.
 
+## Reviewer quick start
+
+The following is the shortest complete Ubuntu 22.04 review path. It uses the
+submitted tag, the assignment's GCC 12 Release flags, the public test target,
+a 300-second Spot capture, the required 26-column check, and deterministic
+offline replay. No API key or other credential is required.
+
+```bash
+git checkout v1.0.0
+
+sudo apt-get update
+sudo apt-get install -y \
+  cmake ninja-build \
+  g++ g++-12 \
+  libssl-dev \
+  libboost-all-dev \
+  zlib1g-dev
+
+cmake -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CXX_COMPILER=g++-12 \
+  -DCMAKE_CXX_FLAGS="-Wall -Wextra -O2"
+cmake --build build --parallel
+cmake --build build --target tests
+
+rm -rf reviewer-output
+./build/binance_capture \
+  --venue spot \
+  --symbols BTCUSDT \
+  --duration 300 \
+  --output-dir reviewer-output
+
+audit_file="$(find reviewer-output -maxdepth 1 -type f \
+  -name 'market_data_spot_BTCUSDT_*.csv' \
+  ! -name '*_orderbook.csv' -print -quit)"
+book_file="$(find reviewer-output -maxdepth 1 -type f \
+  -name 'market_data_spot_BTCUSDT_*_orderbook.csv' -print -quit)"
+head -1 "${audit_file}"
+head -1 "${book_file}"
+awk -F',' 'NR == 2 { print NF }' "${book_file}"
+
+rm -rf reviewer-replay
+./build/binance_capture \
+  --replay testdata/replay/market_data_spot_BTCUSDT_fixture.csv \
+  --output-dir reviewer-replay
+cmp \
+  testdata/replay/expected/market_data_spot_BTCUSDT_fixture_orderbook.csv \
+  reviewer-replay/market_data_spot_BTCUSDT_fixture_orderbook.csv
+```
+
+Expected results: all seven registered test groups pass, live capture writes
+one audit/book pair and exits with `run.status=success`, the `awk` command
+prints `26`, and `cmp` produces no output and returns zero. The remainder of
+this README documents the exact contracts, additional Spot/USD-M commands,
+failure policies, metrics, and evidence behind those checks.
+
 ## Build environment
 
 Reference environment:
