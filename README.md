@@ -19,7 +19,8 @@ evidence.
 Reference environment:
 
 - Ubuntu 22.04
-- GCC 12 (`g++-12`); GCC 11 is also exercised by the clean reviewer build
+- GCC 12 (`g++-12`); Ubuntu 22.04's default GCC 11 (`g++`) is also exercised
+  by the clean reviewer build
 - C++17 with compiler extensions disabled
 - CMake 3.22 or newer and Ninja
 - Boost 1.74 or newer (`Asio`, `Beast`, `System`)
@@ -32,7 +33,7 @@ Install the assignment dependencies:
 sudo apt-get update
 sudo apt-get install -y \
   cmake ninja-build \
-  g++-12 \
+  g++ g++-12 \
   libssl-dev \
   libboost-all-dev \
   zlib1g-dev
@@ -51,7 +52,8 @@ cmake -B build -G Ninja \
 cmake --build build --parallel
 ```
 
-The shortened reviewer build is also supported verbatim:
+The `g++` package supplies the default `c++` driver used by the shortened
+reviewer build, which is also supported verbatim:
 
 ```bash
 cmake -B build

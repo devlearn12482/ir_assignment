@@ -37,7 +37,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             cmake ninja-build \
-            g++-12 \
+            g++ g++-12 \
             libssl-dev \
             libboost-all-dev \
             zlib1g-dev
@@ -51,7 +51,7 @@ jobs:
           /usr/bin/g++-12 --version
           /usr/bin/c++ --version
           dpkg-query -W \
-            cmake ninja-build g++-12 \
+            cmake ninja-build g++ g++-12 \
             libssl-dev libboost-all-dev zlib1g-dev
 
       - name: Run PDF build and test commands
