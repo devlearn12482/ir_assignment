@@ -68,7 +68,7 @@ This is an identifier, not a security hash. Its value is stable across runs, inp
 
 The baseline build targets Ubuntu 22.04, C++17, CMake 3.22 or newer, Boost 1.74 or newer (`Asio`, `Beast`, and `System`), and OpenSSL 3.0 or newer. GCC 11 is the compatibility floor because it is Ubuntu 22.04's default compiler; GCC 12 is the reference compiler used by the PDF's explicit build and the primary release/sanitizer evidence. simdjson 3.6.4 is deliberately vendored and pinned: its On-Demand `value::raw_json()` and low-level four-argument `minify` APIs are part of the dependency contract and are compile-tested.
 
-The public CMake interface must support the PDF/reviewer commands verbatim:
+The public CMake interface must support the PDF and submission commands verbatim:
 
 ```bash
 cmake -B build
@@ -87,7 +87,7 @@ cmake -B build -G Ninja \
 cmake --build build --parallel
 ```
 
-Project warnings and required build options are attached per target; the project does not overwrite `CMAKE_CXX_FLAGS`, so reviewer-supplied flags compose rather than disappear. Evidence covers both the default Unix Makefiles generator with the unpinned compiler command and Ninja with explicit GCC 12. The CMake target `tests` depends on the `unit_tests` executable at exactly `build/tests/unit_tests`.
+Project warnings and required build options are attached per target; the project does not overwrite `CMAKE_CXX_FLAGS`, so externally supplied flags compose rather than disappear. Evidence covers both the default Unix Makefiles generator with the unpinned compiler command and Ninja with explicit GCC 12. The CMake target `tests` depends on the `unit_tests` executable at exactly `build/tests/unit_tests`.
 
 The PDF lists `zlib1g-dev`, but the project does not use or link external zlib. The Beast stream is instantiated with `deflateSupported=false`, so the client never offers `permessage-deflate` and the compression implementation is excluded. Clang 15 is not a baseline claim: the README omits the PDF template's "also tested" sentence unless that build and test run are actually performed and recorded.
 
@@ -101,9 +101,9 @@ The live CLI syntax is:
   [--duration <positive-seconds>]
 ```
 
-`--venue` and `--symbols` are required in live mode. `--output-dir` defaults to `./output`, so the assignment's shortened `--duration 300` reviewer command remains valid. Omitting `--duration` runs until a signal or fatal condition.
+`--venue` and `--symbols` are required in live mode. `--output-dir` defaults to `./output`, so the assignment's shortened `--duration 300` command remains valid. Omitting `--duration` runs until a signal or fatal condition.
 
-The exact bounded reviewer invocation is:
+The exact bounded submission invocation is:
 
 ```bash
 ./build/binance_capture --venue spot --symbols BTCUSDT --duration 300
@@ -678,7 +678,7 @@ tsec,tnsec,seqNo,id,type,side,bid0,bid1,bid2,bid3,bid4,bid_size0,bid_size1,bid_s
 - Unavailable levels use zero price and zero size.
 - Per-file `seqNo` is contiguous; rejected events do not consume it.
 - The `side` values are the uppercase assignment codes `B` (bid-only), `S` (ask-only), and `N` (both/neither or refresh); they never represent trade direction.
-- Every order-book data field is either a base-ten integer or a validated single ASCII character. No field can contain a comma, quote, CR, or LF, so order-book rows are quote-free by construction; this is why the PDF reviewer's `awk -F','` field-count check returns exactly 26 rather than succeeding accidentally on quoted CSV.
+- Every order-book data field is either a base-ten integer or a validated single ASCII character. No field can contain a comma, quote, CR, or LF, so order-book rows are quote-free by construction; this is why the PDF's `awk -F','` field-count check returns exactly 26 rather than succeeding accidentally on quoted CSV.
 
 ### 13.3 Serialization contract
 
@@ -1051,7 +1051,7 @@ Every negative parser or sequence case asserts both state and output: the expect
 
 ### 22.3 README evidence
 
-The README must state, in one reviewer-facing correctness section:
+The README must state, in one submission-facing correctness section:
 
 - Differential, replacement-refresh, and audit-only trade semantics.
 - Spot `U/u`, USD-M `U/u/pu`, gap invalidation, refresh recovery, and new-epoch behavior.
@@ -1114,7 +1114,7 @@ in CI. No unexecuted fixed lifecycle-iteration count is claimed.
 
 ### 24.2 Build and tool evidence
 
-- GCC 11 builds and runs the exact default reviewer path with Unix Makefiles; GCC 12 builds and runs the exact PDF Ninja path with externally injected flags. Both exercise `cmake --build build --target tests` and `./build/tests/unit_tests`.
+- GCC 11 builds and runs the exact default path with Unix Makefiles; GCC 12 builds and runs the exact PDF Ninja path with externally injected flags. Both exercise `cmake --build build --target tests` and `./build/tests/unit_tests`.
 - All project-owned targets compile with GCC 12 under `-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow`; the evidence build adds `-Werror`.
 - Vendored and system include directories are marked as external/system where supported. A project warning is fixed or has a narrow source-local suppression with a written reason; blanket target-wide suppression and unexplained warning output are not accepted.
 - The documented Release build uses at least `-O2 -DNDEBUG`. The README records the exact configure, build, and test commands and does not present sanitizer results as Release performance.
@@ -1124,7 +1124,7 @@ in CI. No unexecuted fixed lifecycle-iteration count is claimed.
 - Code review confirms owning raw pointers are absent, callback captures follow section 6.2, scoped enums/strong value types prevent domain mixing, constants use `constexpr`, and hot-state observation is const-correct.
 - A separate Valgrind run may be reported if convenient, but it is not required in addition to clean ASan/UBSan/leak-detection evidence.
 
-### 24.3 Reviewer evidence
+### 24.3 Validation evidence
 
 The README provides:
 
@@ -1138,7 +1138,7 @@ No criterion-3 requirement adds a stretch runtime feature. Static-analysis suite
 
 ## 25. Observability and reviewability verification
 
-Criterion 4 requires counters and replay to be usable by a reviewer without reading implementation internals or relying on live network timing.
+Criterion 4 requires counters and replay to be usable without reading implementation internals or relying on live network timing.
 
 ### 25.1 Metrics evidence
 
@@ -1171,7 +1171,7 @@ unit/process test harness rather than stored as standalone repository files.
 
 Every fixture and expected output has a committed SHA-256 hash. The test harness creates a new distinct empty output directory and runs the public CLI; it does not call internal parser/book APIs as a substitute for the process-level replay test.
 
-The reviewer-facing single-input form is:
+The submission-facing single-input form is:
 
 ```bash
 ./build/binance_capture \

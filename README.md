@@ -14,7 +14,7 @@ sharding and a full end-to-end performance suite are optional stretch work
 and are not implemented; one isolated core benchmark is retained as review
 evidence.
 
-## Reviewer quick start
+## Quick start
 
 The following is the shortest complete Ubuntu 22.04 review path. It uses the
 submitted tag, the assignment's GCC 12 Release flags, the public test target,
@@ -39,29 +39,29 @@ cmake -B build -G Ninja \
 cmake --build build --parallel
 cmake --build build --target tests
 
-rm -rf reviewer-output
+rm -rf validation-output
 ./build/binance_capture \
   --venue spot \
   --symbols BTCUSDT \
   --duration 300 \
-  --output-dir reviewer-output
+  --output-dir validation-output
 
-audit_file="$(find reviewer-output -maxdepth 1 -type f \
+audit_file="$(find validation-output -maxdepth 1 -type f \
   -name 'market_data_spot_BTCUSDT_*.csv' \
   ! -name '*_orderbook.csv' -print -quit)"
-book_file="$(find reviewer-output -maxdepth 1 -type f \
+book_file="$(find validation-output -maxdepth 1 -type f \
   -name 'market_data_spot_BTCUSDT_*_orderbook.csv' -print -quit)"
 head -1 "${audit_file}"
 head -1 "${book_file}"
 awk -F',' 'NR == 2 { print NF }' "${book_file}"
 
-rm -rf reviewer-replay
+rm -rf validation-replay
 ./build/binance_capture \
   --replay testdata/replay/market_data_spot_BTCUSDT_fixture.csv \
-  --output-dir reviewer-replay
+  --output-dir validation-replay
 cmp \
   testdata/replay/expected/market_data_spot_BTCUSDT_fixture_orderbook.csv \
-  reviewer-replay/market_data_spot_BTCUSDT_fixture_orderbook.csv
+  validation-replay/market_data_spot_BTCUSDT_fixture_orderbook.csv
 ```
 
 Expected results: all seven registered test groups pass, live capture writes
@@ -76,7 +76,7 @@ Reference environment:
 
 - Ubuntu 22.04
 - GCC 12 (`g++-12`); Ubuntu 22.04's default GCC 11 (`g++`) is also exercised
-  by the clean reviewer build
+  by the clean default build
 - C++17 with compiler extensions disabled
 - CMake 3.22 or newer and Ninja
 - Boost 1.74 or newer (`Asio`, `Beast`, `System`)
@@ -109,7 +109,7 @@ cmake --build build --parallel
 ```
 
 The `g++` package supplies the default `c++` driver used by the shortened
-reviewer build, which is also supported verbatim:
+default build, which is also supported verbatim:
 
 ```bash
 cmake -B build
@@ -399,7 +399,7 @@ GCC 12.3.0, CMake 3.22.1, Ninja 1.10.1, Boost 1.74, and OpenSSL 3.0.2.
 
 From that clean checkout, the PDF GCC 12 Release commands completed without
 warnings and all seven registered tests passed. Separate clean builds also
-passed with the default GCC 11 reviewer command, GCC 12 strict warnings as
+passed with the default GCC 11 command, GCC 12 strict warnings as
 errors, and GCC 12 ASan/UBSan with leak detection. Fixture hashes passed, and
 replay under `strace -f -e trace=network` made zero network system calls.
 
@@ -426,7 +426,7 @@ Three location-allowed live checks used the same native Ubuntu guest:
   and `2b58c57d843206308976a71dcab1051f809c027c4bc85442db8e3f993323be59`.
 
 The required hosted Ubuntu 22.04 workflow independently passes the PDF build,
-default reviewer build, strict-warning build, and sanitizer matrix. Its public
+default build, strict-warning build, and sanitizer matrix. Its public
 Binance live step remains manual because hosted-runner egress may be rejected
 by Binance; live evidence above was collected from the location-allowed VM.
 
@@ -472,7 +472,7 @@ server cannot cause an unbounded reconnect loop.
 
 ## Measured performance note
 
-This is reviewer evidence, not a stretch runtime feature or a production
+This is supporting evidence, not a stretch runtime feature or a production
 capacity claim. `hft_core_benchmark` is excluded from the default build. It
 reuses one realistic five-bid/five-ask Spot `depth5` payload and measures the
 shared payload parser, fixed-point conversion, book replacement, and both CSV
